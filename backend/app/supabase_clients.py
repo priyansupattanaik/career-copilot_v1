@@ -16,7 +16,7 @@ def create_user_supabase_client(settings: Settings, user: CurrentUser) -> Client
 
 
 def create_admin_supabase_client(settings: Settings) -> Client:
-    admin_key = settings.supabase_service_role_key or settings.supabase_secret_key
+    admin_key = settings.supabase_secret_key
     if not admin_key:
         raise ApiError(
             503, "admin_client_unavailable", "The administrative Supabase client is not configured."

@@ -4,7 +4,7 @@ export type ApiErrorBody = { error?: { code?: string; message?: string; request_
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const supabase = createSupabaseClient();
-  if (!supabase) throw new Error("Supabase is not configured. Add the public values to .env.local.");
+if (!supabase) throw new Error("Supabase is not configured. Add the public values to the root .env file.");
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error("Your session has expired. Sign in again.");
   const base = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";

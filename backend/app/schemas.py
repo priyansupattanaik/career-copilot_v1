@@ -1,7 +1,7 @@
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 class ProfilePatch(BaseModel):
@@ -108,3 +108,68 @@ class LinkInput(BaseModel):
     label: str | None = None
     url: HttpUrl
     display_order: int = Field(default=0, ge=0)
+
+
+ResumeSection = Literal[
+    "summary", "skills", "experience", "projects", "education", "certifications", "languages"
+]
+SuggestionType = Literal[
+    "rewrite", "clarity", "conciseness", "action_verb", "structure", "job_alignment", "formatting"
+]
+
+
+class ResumeImprovementCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resume_version_id: UUID
+    job_description_id: UUID | None = None
+    ats_analysis_id: UUID | None = None
+    section_keys: list[ResumeSection] = Field(min_length=1, max_length=4)
+
+    @field_validator("section_keys")
+    @classmethod
+    def unique_sections(cls, value: list[ResumeSection]) -> list[ResumeSection]:
+        if len(value) != len(set(value)):
+            raise ValueError("section_keys must be unique")
+        return value
+
+
+class ProviderSuggestion(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    section_key: ResumeSection
+    source_block_id: str = Field(min_length=1, max_length=160)
+    source_text: str = Field(min_length=1, max_length=8_000)
+    proposed_text: str = Field(min_length=1, max_length=8_000)
+    reason: str = Field(min_length=1, max_length=1_000)
+    suggestion_type: SuggestionType
+    evidence_references: list[str] = Field(min_length=1, max_length=20)
+
+
+class ProviderSuggestionResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    suggestions: list[ProviderSuggestion] = Field(max_length=40)
+
+
+class ResumeSuggestionDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    decision: Literal["accepted", "edited", "rejected", "pending"]
+    candidate_text: str | None = Field(default=None, max_length=8_000)
+    candidate_confirmed: bool = False
+
+    @model_validator(mode="after")
+    def validate_candidate_edit(self) -> "ResumeSuggestionDecision":
+        if self.decision == "edited" and (not self.candidate_text or not self.candidate_confirmed):
+            raise ValueError("Edited text requires candidate confirmation")
+        if self.decision != "edited" and self.candidate_text is not None:
+            raise ValueError("candidate_text is allowed only for edited decisions")
+        return self
+
+
+class ResumeExportCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["pdf", "docx"]
+
+
+class ManualResumeVersionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    structured_content: dict[str, Any]
+    candidate_confirmed: Literal[True]

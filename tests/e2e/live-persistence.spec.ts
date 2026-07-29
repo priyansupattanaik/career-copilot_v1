@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 
@@ -16,9 +17,9 @@ function readEnvironment(path: string) {
 
 test.describe("live Supabase persistence", () => {
   test.describe.configure({ mode: "serial" });
-  const backendEnvironment = readEnvironment("backend/.env");
+  const backendEnvironment = readEnvironment(".env");
   const projectUrl = backendEnvironment.SUPABASE_URL;
-  const adminKey = backendEnvironment.SUPABASE_SERVICE_ROLE_KEY || backendEnvironment.SUPABASE_SECRET_KEY;
+  const adminKey = backendEnvironment.SUPABASE_SECRET_KEY;
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const email = `audit-browser-${suffix}@example.invalid`;
   const password = `Audit-${suffix}-A1!`;
@@ -92,6 +93,43 @@ test.describe("live Supabase persistence", () => {
     await page.getByRole("button", { name: "Store job description" }).click();
     await expect(page.getByRole("status")).toContainText("Job description stored for review");
 
+    const resumeId = randomUUID();
+    const versionId = randomUUID();
+    const insertedResume = await admin.from("resumes").insert({
+      id: resumeId,
+      user_id: userId,
+      title: "Browser audit resume",
+      is_active: true,
+    });
+    expect(insertedResume.error).toBeNull();
+    const insertedVersion = await admin.from("resume_versions").insert({
+      id: versionId,
+      resume_id: resumeId,
+      user_id: userId,
+      version_number: 1,
+      source_type: "uploaded",
+      original_filename: "audit.docx",
+      storage_path: `${userId}/audit/source.docx`,
+      mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      size_bytes: 1,
+      sha256: "0".repeat(64),
+      plain_text: "Backend engineer\nSkills\nPython, FastAPI",
+      structured_content: {
+        sections: { summary: ["Backend engineer"], skills: ["Python, FastAPI"] },
+        unclassified_blocks: ["Audit Candidate"],
+      },
+      extraction_status: "confirmed",
+    });
+    expect(insertedVersion.error).toBeNull();
+
+    await page.goto(`/resume-builder/${resumeId}`);
+    await expect(page.getByRole("heading", { name: "Browser audit resume" })).toBeVisible();
+    await expect(page.getByText("NVIDIA ready")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Generate grounded suggestions" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Create Manual Version" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Export PDF" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Export DOCX" })).toBeEnabled();
+
     for (const [width, height] of [
       [320, 568],
       [375, 667],
@@ -125,11 +163,13 @@ test.describe("live Supabase persistence", () => {
     const descriptions = await admin.from("job_descriptions").select("id,user_id").eq("user_id", userId);
     expect(descriptions.data).toHaveLength(1);
 
+    expect(browserErrors).toEqual([]);
+    page.removeAllListeners("console");
+    page.removeAllListeners("pageerror");
     await page.goto("/settings/account");
     await page.getByRole("button", { name: "Logout", exact: true }).click();
     await expect(page).toHaveURL(/\/$/);
     await page.goto("/dashboard");
     await expect(page).toHaveURL(/\/sign-in/);
-    expect(browserErrors).toEqual([]);
   });
 });

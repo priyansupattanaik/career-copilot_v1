@@ -18,7 +18,7 @@ export default defineConfig({
       command: `${backendPython} -m uvicorn app.main:app --port 8000 --app-dir backend`,
       url: "http://127.0.0.1:8000/api/v1/health",
       env: {
-        FRONTEND_ORIGINS: '["http://localhost:3100","http://127.0.0.1:3100"]',
+        FRONTEND_ORIGINS: "http://localhost:3100,http://127.0.0.1:3100",
       },
       reuseExistingServer: false,
       timeout: 120000,

@@ -7,6 +7,7 @@ const scannerPath = join(root, "scripts", "check-secrets.mjs");
 const ignored = new Set([".git", ".next", "node_modules", "coverage", "playwright-report", "test-results", ".venv", ".temp", ".pytest_cache", "__pycache__"]);
 const textExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".json", ".md", ".py", ".toml", ".sql", ".yml", ".yaml", ".env", ".example", ".txt"]);
 const rules = [
+  ["NVIDIA API key", /nvapi-[A-Za-z0-9_-]+/g],
   ["Supabase secret key", /sb_secret_[A-Za-z0-9_-]+/g],
   ["JWT-like credential", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g],
   ["Credential-bearing database URL", /postgres(?:ql)?:\/\/[^\s:@]+:[^\s@]+@/gi],

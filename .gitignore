@@ -5,10 +5,7 @@ playwright-report/
 test-results/
 .env
 .env.*
-!.env.example
-backend/.env
-backend/.env.*
-!backend/.env.example
+!.gitignore
 .venv/
 backend/.venv/
 supabase/.temp/

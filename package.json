@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "check": "npm run check:secrets && npm run check:frontend",
+    "check": "npm run check:secrets && npm run check:env && npm run check:frontend",
+    "check:env": "node scripts/verify-environment.mjs",
     "check:frontend": "npm run lint && npm run typecheck && npm run test && npm run build",
     "check:secrets": "node scripts/check-secrets.mjs"
   },

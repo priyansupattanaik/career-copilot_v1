@@ -12,7 +12,7 @@ function Shell({ children, title, description }: { children: React.ReactNode; ti
   return <main id="main-content" className="auth-shell"><aside className="auth-aside"><Link className="brand" href="/"><Image src="/brand/logo-mark.svg" width={42} height={42} alt="" />Career Copilot</Link><div><p className="eyebrow">One connected workspace</p><h1>{title}</h1><p>{description}</p></div></aside><section className="auth-main">{children}</section></main>;
 }
 
-function configurationError() { return "Supabase is not configured. Copy .env.example to .env.local and add newly rotated public project values."; }
+function configurationError() { return "Supabase is not configured. Add the public project values to the root .env file."; }
 
 export function SignInScreen() {
   const router = useRouter(); const search = useSearchParams(); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [error, setError] = useState(search.get("error") === "configuration_required" ? configurationError() : ""); const [busy, setBusy] = useState(false);

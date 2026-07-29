@@ -17,6 +17,7 @@ from app.repository import (
     recalculate_completion,
     write_activity,
 )
+from app.resume_improvement_routes import router as resume_improvement_router
 from app.schemas import (
     ExtractionPatch,
     InterviewCreate,
@@ -32,6 +33,7 @@ from app.schemas import (
 from app.supabase_clients import create_admin_supabase_client
 
 router = APIRouter()
+router.include_router(resume_improvement_router)
 
 
 def utc_now() -> str:
