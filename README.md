@@ -1,36 +1,27 @@
-# Career Copilot UI
+# Career Copilot
 
-Career Copilot is a frontend-only, evidence-led career preparation workspace built with Next.js App Router, TypeScript, Tailwind CSS, Motion, React Three Fiber, Recharts, React Hook Form, and Zod.
+Career Copilot is a Next.js application backed by Supabase Auth, PostgreSQL, private Storage buckets, and a Python FastAPI service. Browser storage and seeded candidate records are not used as application state.
 
-The demo connects candidate profile, resume analysis, extraction review, ATS evidence, resume improvement, mock interviews, learning paths, job recommendations, and privacy/settings state. It does not claim that a real ATS, AI evaluator, job feed, OAuth service, or biometric system is connected.
+## First run
 
-## Run the project
+Install JavaScript and Python dependencies with one command:
 
-On the first run, install the dependencies:
-
-```text
+```powershell
 npm install
 ```
 
-Then start the development server:
+Copy `.env.example` to `.env.local` and `backend/.env.example` to `backend/.env`. Add newly rotated Supabase values; never reuse credentials posted in chat or commit either environment file. Apply the SQL migration in `supabase/migrations` to the intended Supabase project.
 
-```text
+Start the frontend and backend together:
+
+```powershell
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+Open `http://localhost:3000`. The API runs at `http://127.0.0.1:8000`, with development docs at `/docs`.
 
-For later runs, only `npm run dev` is required unless the dependencies change.
+## Other commands
 
-## Validation
+`npm run dev:frontend` starts only Next.js. `npm run dev:backend` starts only FastAPI. `npm run check` runs the secret scanner and frontend validation. Backend tests run with `backend/.venv/Scripts/python -m pytest backend/tests`.
 
-```text
-npm run check
-npm run test:e2e
-```
-
-Playwright browsers may need to be installed once with `npx playwright install chromium`.
-
-## Demo data
-
-State is stored through one guarded, versioned local-storage adapter. Use Settings → Privacy → Clear stored demo data to reset the experience.
+Supabase migrations, ownership policies, trigger bootstrap, indexes, and private bucket policies live under `supabase/`. A local Supabase stack additionally requires Docker and the Supabase CLI.

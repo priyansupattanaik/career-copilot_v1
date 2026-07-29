@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
-import { DemoProvider } from "@/providers/demo-provider";
 import "./globals.css";
 
 const space = localFont({ src: "../../node_modules/@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2", variable: "--font-space", weight: "300 700", display: "swap" });
@@ -9,5 +8,5 @@ const mono = localFont({ src: [{ path: "../../node_modules/@fontsource/ibm-plex-
 export const metadata: Metadata = { title: { default: "Career Copilot", template: "%s · Career Copilot" }, description: "One evidence-led workspace for career preparation." };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en" data-scroll-behavior="smooth"><body className={`${space.variable} ${mono.variable}`}><a className="skip-link" href="#main-content">Skip to content</a><DemoProvider>{children}</DemoProvider></body></html>;
+  return <html lang="en" data-scroll-behavior="smooth"><body className={`${space.variable} ${mono.variable}`}><a className="skip-link" href="#main-content">Skip to content</a>{children}</body></html>;
 }
