@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Badge, Button, Card, Input, PageHeader, Textarea } from "@/components/ui/primitives";
+import { Badge, Button, Card, Input, PageHeader, Progress, Textarea } from "@/components/ui/primitives";
 import { apiRequest } from "@/lib/api/client";
 import { isValidCareerFile } from "@/lib/utils";
 
@@ -25,8 +25,28 @@ type ResumeVersion = {
   created_at: string;
 };
 type Resume = { id: string; title: string; is_active: boolean; created_at: string; versions?: ResumeVersion[] };
-type Analysis = { id: string; status: string; overall_score: number | null; created_at: string };
-type JobDescription = { id: string; title: string; extraction_status: string };
+type Analysis = {
+  id: string;
+  status: string;
+  overall_score: number | null;
+  score_breakdown?: { matched_terms?: string[]; missing_terms?: string[]; total_terms?: number };
+  summary?: { method?: string; disclaimer?: string };
+  created_at: string;
+};
+type JobDescription = {
+  id: string;
+  title: string;
+  extraction_status: string;
+  structured_content?: StructuredResume;
+  raw_text?: string;
+};
+type AtsEvidence = {
+  id: string;
+  requirement_text: string;
+  resume_evidence_text?: string | null;
+  match_status: "strong_match" | "partial_match" | "not_found" | "unverified" | "not_applicable";
+  explanation?: string | null;
+};
 type Capability = {
   nvidia_configured: boolean;
   selected_model: string | null;
@@ -73,38 +93,101 @@ export function AnalysisHistory() {
     {error && <p role="alert" className="field-error">{error}</p>}
     <div className="grid-2">
       <Card><h2>Resumes</h2>{resumes.length ? resumes.map((resume) => <div className="suggestion" key={resume.id}><strong>{resume.title}</strong><span>{resume.is_active ? "Active" : "Stored"}</span><Link href={`/resume-builder/${resume.id}`}>Open builder</Link></div>) : <p>No resumes uploaded.</p>}</Card>
-      <Card><h2>ATS analyses</h2>{analyses.length ? analyses.map((analysis) => <div className="suggestion" key={analysis.id}><strong>{analysis.overall_score == null ? "No score" : `${analysis.overall_score}/100`}</strong><span>{analysis.status}</span></div>) : <p>No real analyses exist. The ATS engine is currently unavailable.</p>}</Card>
+      <Card><h2>ATS analyses</h2>{analyses.length ? analyses.map((analysis) => <div className="suggestion" key={analysis.id}><strong>{analysis.overall_score == null ? "No score" : `${analysis.overall_score}/100`}</strong><span>{analysis.status}</span>{analysis.status === "completed" && <Link href={`/resume-analysis/report/${analysis.id}`}>Open evidence report</Link>}</div>) : <p>No ATS analysis exists yet. Add and confirm a resume and job description to calculate one.</p>}</Card>
     </div>
   </>;
 }
 
 export function NewAnalysis() {
+  const router = useRouter();
   const [title, setTitle] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [jd, setJd] = useState("");
+  const [resume, setResume] = useState<Resume | null>(null);
+  const [resumeVersion, setResumeVersion] = useState<ResumeVersion | null>(null);
+  const [job, setJob] = useState<JobDescription | null>(null);
+  const [reviewed, setReviewed] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([apiRequest<Resume[]>("/resumes"), apiRequest<JobDescription[]>("/job-descriptions")])
+      .then(async ([resumeRows, jobRows]) => {
+        const latestResume = resumeRows.at(-1) || null;
+        const latestJob = jobRows.at(-1) || null;
+        const detail = latestResume ? await apiRequest<Resume>(`/resumes/${latestResume.id}`) : null;
+        if (!active) return;
+        setResume(detail || latestResume);
+        setResumeVersion(detail?.versions?.[0] || null);
+        setJob(latestJob);
+      })
+      .catch((reason: Error) => { if (active) setError(reason.message); });
+    return () => { active = false; };
+  }, []);
+
   async function upload() {
     if (!file || !isValidCareerFile(file)) return setError("Choose a PDF or DOCX no larger than 10 MB.");
     const body = new FormData(); body.set("title", title || file.name); body.set("file", file);
+    setBusy(true);
     try {
-      const result = await apiRequest<{ resume: Resume }>("/resumes", { method: "POST", body });
-      setMessage(`Stored ${result.resume.title}. Review the extracted content before confirming it.`); setError("");
-    } catch (reason) { setError((reason as Error).message); }
+      const result = await apiRequest<{ resume: Resume; version: ResumeVersion }>("/resumes", { method: "POST", body });
+      setResume(result.resume); setResumeVersion(result.version); setReviewed(false);
+      setMessage(`Stored ${result.resume.title}. Review both extracted inputs below, then calculate the score.`); setError("");
+    } catch (reason) { setError((reason as Error).message); } finally { setBusy(false); }
   }
   async function addJd() {
+    setBusy(true);
     try {
-      await apiRequest("/job-descriptions", { method: "POST", body: JSON.stringify({ title: "Job description", raw_text: jd }) });
-      setMessage("Job description stored for review. No ATS score was generated."); setError("");
-    } catch (reason) { setError((reason as Error).message); }
+      const result = await apiRequest<JobDescription>("/job-descriptions", { method: "POST", body: JSON.stringify({ title: "Job description", raw_text: jd }) });
+      setJob(result); setReviewed(false);
+      setMessage("Job description stored. Review both extracted inputs below, then calculate the score."); setError("");
+    } catch (reason) { setError((reason as Error).message); } finally { setBusy(false); }
   }
+  async function calculate() {
+    if (!resume || !resumeVersion || !job || !reviewed) return;
+    setBusy(true); setError(""); setMessage("Confirming evidence and calculating deterministic keyword coverage…");
+    try {
+      let confirmedVersion = resumeVersion;
+      if (confirmedVersion.extraction_status !== "confirmed") {
+        confirmedVersion = await apiRequest<ResumeVersion>(`/resume-versions/${confirmedVersion.id}/confirm`, { method: "POST" });
+        setResumeVersion(confirmedVersion);
+      }
+      if (!resume.is_active) {
+        const activeResume = await apiRequest<Resume>(`/resumes/${resume.id}/activate`, { method: "POST" });
+        setResume(activeResume);
+      }
+      let confirmedJob = job;
+      if (confirmedJob.extraction_status !== "confirmed") {
+        confirmedJob = await apiRequest<JobDescription>(`/job-descriptions/${confirmedJob.id}/confirm`, { method: "POST" });
+        setJob(confirmedJob);
+      }
+      const analysis = await apiRequest<Analysis>("/ats-analyses", {
+        method: "POST",
+        body: JSON.stringify({ resume_version_id: confirmedVersion.id, job_description_id: confirmedJob.id }),
+      });
+      router.push(`/resume-analysis/report/${analysis.id}`);
+    } catch (reason) { setError((reason as Error).message); setMessage(""); } finally { setBusy(false); }
+  }
+  const resumeSections = resumeVersion?.structured_content?.sections || {};
+  const jobSections = job?.structured_content?.sections || {};
   return <>
     <PageHeader eyebrow="Real document ingestion" title="Add resume and job evidence" description="Files are validated, stored privately, parsed deterministically, and marked for your review." />
     <div className="grid-2">
-      <Card className="stack"><h2>Resume</h2><label className="field-label">Library title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="field-label">PDF or DOCX<Input type="file" accept=".pdf,.docx" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label><Button onClick={upload}>Upload resume</Button></Card>
-      <Card className="stack"><h2>Job description</h2><label className="field-label">Paste text<Textarea value={jd} onChange={(event) => setJd(event.target.value)} /></label><Button disabled={!jd.trim()} onClick={addJd}>Store job description</Button></Card>
+      <Card className="stack"><h2>Resume</h2><label className="field-label">Library title<Input value={title} onChange={(event) => setTitle(event.target.value)} /></label><label className="field-label">PDF or DOCX<Input type="file" accept=".pdf,.docx" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label><Button disabled={busy} onClick={upload}>{busy ? "Working…" : "Upload resume"}</Button></Card>
+      <Card className="stack"><h2>Job description</h2><label className="field-label">Paste text<Textarea value={jd} onChange={(event) => setJd(event.target.value)} /></label><Button disabled={busy || !jd.trim()} onClick={addJd}>{busy ? "Working…" : "Store job description"}</Button></Card>
     </div>
     {error && <p role="alert" className="field-error">{error}</p>}{message && <Card><p role="status">{message}</p></Card>}
+    {(resumeVersion || job) && <Card className="stack ats-review"><div className="row"><div><p className="eyebrow">Required review</p><h2>Confirm the evidence used for scoring</h2></div><Badge tone={resumeVersion && job ? "success" : "warning"}>{resumeVersion && job ? "Both inputs ready" : "One input missing"}</Badge></div>
+      <div className="grid-2">
+        <div><h3>Resume · {resume?.title || "Not uploaded"}</h3><p className="muted">Status: {resumeVersion?.extraction_status || "missing"}</p>{Object.keys(resumeSections).length ? <details><summary>View extracted resume</summary>{Object.entries(resumeSections).map(([section, lines]) => <div key={section}><strong>{section.replaceAll("_", " ")}</strong><p>{lines.join(" · ")}</p></div>)}</details> : <p>No extracted resume is available.</p>}</div>
+        <div><h3>Job description · {job?.title || "Not stored"}</h3><p className="muted">Status: {job?.extraction_status || "missing"}</p>{Object.keys(jobSections).length ? <details><summary>View extracted job description</summary>{Object.entries(jobSections).map(([section, lines]) => <div key={section}><strong>{section.replaceAll("_", " ")}</strong><p>{lines.join(" · ")}</p></div>)}</details> : <p>No extracted job description is available.</p>}</div>
+      </div>
+      <label><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} /> I reviewed the extracted resume and job description and confirm they can be used for ATS keyword coverage.</label>
+      <Button disabled={busy || !resumeVersion || !job || !reviewed} onClick={calculate}>{busy ? "Calculating…" : "Confirm inputs and calculate ATS score"}</Button>
+      <p className="muted">The score measures normalized JD keyword coverage and stores matched and missing evidence. It is not a hiring prediction.</p>
+    </Card>}
   </>;
 }
 
@@ -113,7 +196,26 @@ export function ExtractionReview() {
 }
 
 export function AtsReport() {
-  return <><PageHeader eyebrow="ATS analysis" title="No generated report loaded" description="Reports display only after a real ATS engine persists evidence and a score." /><Card className="empty-state"><h2>Report unavailable</h2><p>No sample score or fabricated evidence is shown.</p></Card></>;
+  const params = useParams<{ reportId: string }>();
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [evidence, setEvidence] = useState<AtsEvidence[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    Promise.all([
+      apiRequest<Analysis>(`/ats-analyses/${params.reportId}`),
+      apiRequest<AtsEvidence[]>(`/ats-analyses/${params.reportId}/evidence`),
+    ]).then(([record, rows]) => { setAnalysis(record); setEvidence(rows); }).catch((reason: Error) => setError(reason.message));
+  }, [params.reportId]);
+  if (error) return <><PageHeader eyebrow="ATS analysis" title="Report unavailable" description="The persisted report could not be loaded." /><Card><p role="alert" className="field-error">{error}</p></Card></>;
+  if (!analysis) return <><PageHeader eyebrow="ATS analysis" title="Loading evidence report" description="Reading the persisted analysis from your workspace…" /></>;
+  const matched = evidence.filter((item) => item.match_status === "strong_match");
+  const missing = evidence.filter((item) => item.match_status === "not_found");
+  return <div className="stack"><PageHeader eyebrow="ATS keyword coverage" title={`${analysis.overall_score ?? 0}/100`} description="A deterministic comparison of confirmed resume text against confirmed job-description terms." action={<Link className="button button-secondary" href="/resume-analysis/new">Run another analysis</Link>} />
+    <Card className="stack panel-blue"><Progress value={analysis.overall_score || 0} label="JD keyword coverage" /><p><strong>{matched.length}</strong> matched and <strong>{missing.length}</strong> missing across {evidence.length} scored terms.</p><p>{analysis.summary?.disclaimer || "Coverage evidence is not a hiring prediction."}</p></Card>
+    <div className="grid-2"><Card className="stack"><h2>Matched evidence</h2>{matched.length ? matched.map((item) => <div className="suggestion" key={item.id}><strong>{item.requirement_text}</strong><span>{item.resume_evidence_text || "Matched in confirmed resume text"}</span></div>) : <p>No scored JD term was found in the confirmed resume.</p>}</Card>
+      <Card className="stack"><h2>Missing terms</h2>{missing.length ? missing.map((item) => <div className="suggestion" key={item.id}><strong>{item.requirement_text}</strong><span>{item.explanation}</span></div>) : <p>No scored JD terms are missing.</p>}</Card></div>
+    <Card><p className="muted">Method: {analysis.summary?.method || "Deterministic normalized keyword coverage"}. Matching is exact after normalization, so it remains auditable and does not invent candidate experience.</p></Card>
+  </div>;
 }
 
 export function ResumeBuilder() {

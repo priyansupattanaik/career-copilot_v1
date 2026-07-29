@@ -51,6 +51,12 @@ class ExtractionPatch(BaseModel):
     structured_content: dict[str, Any]
 
 
+class AtsAnalysisCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resume_version_id: UUID
+    job_description_id: UUID
+
+
 class InterviewCreate(BaseModel):
     mode: Literal[
         "resume", "resume_and_jd", "role", "topic", "company", "behavioural", "technical", "hr", "mixed"

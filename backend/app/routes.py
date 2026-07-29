@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, File, Form, Header, UploadFile
 
+from app.ats import ALGORITHM_VERSION, score_resume
 from app.auth import CurrentUser, get_current_user
 from app.config import Settings, get_settings
 from app.documents import extract_sections, extract_text, safe_filename, sha256_bytes, validate_document
@@ -19,6 +20,7 @@ from app.repository import (
 )
 from app.resume_improvement_routes import router as resume_improvement_router
 from app.schemas import (
+    AtsAnalysisCreate,
     ExtractionPatch,
     InterviewCreate,
     InterviewResponseCreate,
@@ -79,6 +81,17 @@ def bootstrap(
         .data
         or []
     )
+    latest_analysis = (
+        client.table("ats_analyses")
+        .select("id,overall_score,status,created_at")
+        .eq("user_id", str(user.id))
+        .eq("status", "completed")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
     unread = (
         client.table("user_notifications")
         .select("id", count="exact")
@@ -106,9 +119,10 @@ def bootstrap(
         "profile": profile,
         "active_resume": active_resume[0] if active_resume else None,
         "active_job_description": latest_jd[0] if latest_jd else None,
+        "latest_ats_analysis": latest_analysis[0] if latest_analysis else None,
         "unread_notification_count": unread.count or 0,
         "counts": counts,
-        "capabilities": {"ats_scoring": False, "interview_evaluation": False, "job_recommendations": False},
+        "capabilities": {"ats_scoring": True, "interview_evaluation": False, "job_recommendations": False},
     }
 
 
@@ -613,9 +627,142 @@ def get_ats(
     return owned_row(client_for(settings, user), "ats_analyses", analysis_id, user)
 
 
-@router.post("/ats-analyses", status_code=503)
-def create_ats(_: dict[str, Any] = Body(...), user: CurrentUser = Depends(get_current_user)):
-    raise ApiError(503, "ats_engine_unavailable", "ATS scoring is not implemented. No score was generated.")
+@router.post("/ats-analyses", status_code=201)
+def create_ats(
+    payload: AtsAnalysisCreate,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    client = client_for(settings, user)
+    version = owned_row(client, "resume_versions", payload.resume_version_id, user)
+    job = owned_row(client, "job_descriptions", payload.job_description_id, user)
+    if version.get("extraction_status") != "confirmed":
+        raise ApiError(409, "resume_not_confirmed", "Confirm the extracted resume before scoring it.")
+    if job.get("extraction_status") != "confirmed":
+        raise ApiError(409, "job_description_not_confirmed", "Confirm the job description before scoring it.")
+
+    existing = (
+        client.table("ats_analyses")
+        .select("*")
+        .eq("user_id", str(user.id))
+        .eq("resume_version_id", str(payload.resume_version_id))
+        .eq("job_description_id", str(payload.job_description_id))
+        .eq("algorithm_version", ALGORITHM_VERSION)
+        .eq("status", "completed")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if existing:
+        return existing[0]
+
+    try:
+        score = score_resume(version.get("plain_text") or "", job.get("raw_text") or "")
+    except ValueError as exc:
+        raise ApiError(422, "ats_input_insufficient", str(exc)) from exc
+
+    analysis = (
+        client.table("ats_analyses")
+        .insert(
+            {
+                "user_id": str(user.id),
+                "resume_version_id": str(payload.resume_version_id),
+                "job_description_id": str(payload.job_description_id),
+                "status": "processing",
+                "algorithm_version": ALGORITHM_VERSION,
+                "started_at": utc_now(),
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    try:
+        evidence_rows = [
+            {
+                "user_id": str(user.id),
+                "analysis_id": analysis["id"],
+                "category": "keyword_coverage",
+                "requirement_text": item.requirement,
+                "requirement_type": "keyword",
+                "resume_evidence_text": item.resume_evidence,
+                "resume_section": item.resume_section,
+                "resume_source_reference": {"resume_version_id": str(payload.resume_version_id)},
+                "job_description_source_reference": {"job_description_id": str(payload.job_description_id)},
+                "match_status": "strong_match" if item.matched else "not_found",
+                "score_contribution": item.score_contribution,
+                "rule_id": "exact_normalized_keyword",
+                "explanation": (
+                    "The normalized term appears in the resume."
+                    if item.matched
+                    else "The normalized term was not found in the resume."
+                ),
+            }
+            for item in score.evidence
+        ]
+        if evidence_rows:
+            client.table("ats_evidence").insert(evidence_rows).execute()
+        completed = (
+            client.table("ats_analyses")
+            .update(
+                {
+                    "status": "completed",
+                    "overall_score": score.overall_score,
+                    "score_breakdown": score.breakdown,
+                    "summary": {
+                        "method": "Deterministic normalized keyword coverage",
+                        "matched": len(score.matched_terms),
+                        "total": len(score.evidence),
+                        "disclaimer": "Coverage evidence is not a hiring prediction.",
+                    },
+                    "completed_at": utc_now(),
+                }
+            )
+            .eq("id", analysis["id"])
+            .eq("user_id", str(user.id))
+            .execute()
+            .data[0]
+        )
+    except Exception as exc:
+        client.table("ats_analyses").update(
+            {
+                "status": "failed",
+                "error_code": "ats_persistence_failed",
+                "error_message": "Scoring could not be persisted.",
+            }
+        ).eq("id", analysis["id"]).eq("user_id", str(user.id)).execute()
+        raise ApiError(500, "ats_persistence_failed", "The ATS analysis could not be persisted.") from exc
+
+    write_activity(
+        client,
+        user,
+        "ats_analysis_completed",
+        "ATS keyword coverage completed",
+        "ats_analysis",
+        completed["id"],
+    )
+    return completed
+
+
+@router.get("/ats-analyses/{analysis_id}/evidence")
+def list_ats_evidence(
+    analysis_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    client = client_for(settings, user)
+    owned_row(client, "ats_analyses", analysis_id, user)
+    return (
+        client.table("ats_evidence")
+        .select("*")
+        .eq("analysis_id", str(analysis_id))
+        .eq("user_id", str(user.id))
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
 
 
 @router.get("/ats-analyses/{analysis_id}/suggestions")

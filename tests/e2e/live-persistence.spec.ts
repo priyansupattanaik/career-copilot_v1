@@ -91,7 +91,7 @@ test.describe("live Supabase persistence", () => {
       "Evidence Engineer role requiring Python, SQL, accessibility, and secure data persistence.",
     );
     await page.getByRole("button", { name: "Store job description" }).click();
-    await expect(page.getByRole("status")).toContainText("Job description stored for review");
+    await expect(page.getByRole("status")).toContainText("Job description stored");
 
     const resumeId = randomUUID();
     const versionId = randomUUID();
@@ -99,7 +99,7 @@ test.describe("live Supabase persistence", () => {
       id: resumeId,
       user_id: userId,
       title: "Browser audit resume",
-      is_active: true,
+      is_active: false,
     });
     expect(insertedResume.error).toBeNull();
     const insertedVersion = await admin.from("resume_versions").insert({
@@ -118,9 +118,19 @@ test.describe("live Supabase persistence", () => {
         sections: { summary: ["Backend engineer"], skills: ["Python, FastAPI"] },
         unclassified_blocks: ["Audit Candidate"],
       },
-      extraction_status: "confirmed",
+      extraction_status: "review_required",
     });
     expect(insertedVersion.error).toBeNull();
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Confirm the evidence used for scoring" })).toBeVisible();
+    await page.getByLabel(/I reviewed the extracted resume and job description/i).check();
+    await page.getByRole("button", { name: "Confirm inputs and calculate ATS score" }).click();
+    await expect(page).toHaveURL(/\/resume-analysis\/report\/[0-9a-f-]+$/);
+    await expect(page.getByText("JD keyword coverage")).toBeVisible();
+    await expect(page.getByRole("heading", { name: /\/100$/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Matched evidence" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Missing terms" })).toBeVisible();
 
     await page.goto(`/resume-builder/${resumeId}`);
     await expect(page.getByRole("heading", { name: "Browser audit resume" })).toBeVisible();
@@ -162,6 +172,9 @@ test.describe("live Supabase persistence", () => {
     expect(privacy.data?.resume_processing_consent).toBe(true);
     const descriptions = await admin.from("job_descriptions").select("id,user_id").eq("user_id", userId);
     expect(descriptions.data).toHaveLength(1);
+    const analyses = await admin.from("ats_analyses").select("id,overall_score,status").eq("user_id", userId);
+    expect(analyses.data).toHaveLength(1);
+    expect(analyses.data?.[0].status).toBe("completed");
 
     expect(browserErrors).toEqual([]);
     page.removeAllListeners("console");

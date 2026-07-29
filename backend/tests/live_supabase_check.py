@@ -166,6 +166,39 @@ async def main():
                 f"/api/v1/resume-versions/{resume_body['version']['id']}/confirm", headers=headers
             )
             assert confirm.status_code == 200, confirm.text
+            activate = await api.post(
+                f"/api/v1/resumes/{resume_body['resume']['id']}/activate", headers=headers
+            )
+            assert activate.status_code == 200, activate.text
+            confirm_jd = await api.post(
+                f"/api/v1/job-descriptions/{jd.json()['id']}/confirm", headers=headers
+            )
+            assert confirm_jd.status_code == 200, confirm_jd.text
+            analysis = await api.post(
+                "/api/v1/ats-analyses",
+                headers=headers,
+                json={
+                    "resume_version_id": resume_body["version"]["id"],
+                    "job_description_id": jd.json()["id"],
+                },
+            )
+            assert analysis.status_code == 201, analysis.text
+            analysis_body = analysis.json()
+            assert analysis_body["status"] == "completed"
+            assert 0 <= float(analysis_body["overall_score"]) <= 100
+            evidence = await api.get(
+                f"/api/v1/ats-analyses/{analysis_body['id']}/evidence", headers=headers
+            )
+            assert evidence.status_code == 200, evidence.text
+            assert evidence.json()
+            blocked_evidence = await api.get(
+                f"/api/v1/ats-analyses/{analysis_body['id']}/evidence",
+                headers={"Authorization": f"Bearer {tokens[1]}"},
+            )
+            assert blocked_evidence.status_code == 404, blocked_evidence.text
+            summary["ats_score"] = analysis_body["overall_score"]
+            summary["ats_evidence"] = len(evidence.json())
+            summary["ats_rls"] = "passed"
             summary["backend_live_flow"] = "passed"
 
         print(json.dumps(summary, sort_keys=True))
