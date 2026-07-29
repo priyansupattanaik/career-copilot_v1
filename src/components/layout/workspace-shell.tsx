@@ -1,0 +1,21 @@
+"use client";
+
+import Image from "next/image";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { Bell, BookOpenCheck, BriefcaseBusiness, FileSearch, Gauge, Menu, Mic2, Search, Settings, X } from "lucide-react";
+import { Progress } from "@/components/ui/primitives";
+import { routes } from "@/lib/routes";
+import { useDemo } from "@/providers/demo-provider";
+
+const navigation = [{ href: routes.dashboard, label: "Dashboard", icon: Gauge },{ href: routes.resume, label: "Resume Analysis", icon: FileSearch },{ href: routes.interview, label: "Mock Interview", icon: Mic2 },{ href: routes.learning, label: "Learning Path", icon: BookOpenCheck },{ href: routes.jobs, label: "Recommended Jobs", icon: BriefcaseBusiness },{ href: routes.settings, label: "Settings", icon: Settings }];
+const titles: Record<string, string> = { dashboard: "Dashboard", "resume-analysis": "Resume Analysis", "resume-builder": "Resume Builder", "mock-interview": "Mock Interview", learning: "Learning Path", jobs: "Recommended Jobs", settings: "Settings" };
+
+export function WorkspaceShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname(); const router = useRouter(); const { state, dispatch } = useDemo(); const [open, setOpen] = useState(false); const [profile, setProfile] = useState(false); const root = pathname.split("/")[1];
+  useEffect(() => { document.body.style.overflow = open ? "hidden" : ""; return () => { document.body.style.overflow = ""; }; }, [open]);
+  useEffect(() => { if (!open) return; const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); }; window.addEventListener("keydown", closeOnEscape); return () => window.removeEventListener("keydown", closeOnEscape); }, [open]);
+  const logout = () => { dispatch({ type: "patch", value: { authenticated: false } }); router.push("/"); };
+  return <div className="workspace"><aside className={`sidebar ${open ? "open" : ""}`} aria-label="Workspace navigation"><div className="row"><Link className="brand" href="/"><Image src="/brand/logo-mark.svg" width={38} height={38} alt="" />Career Copilot</Link>{open && <button className="icon-button" onClick={() => setOpen(false)} aria-label="Close navigation"><X /></button>}</div><nav className="sidebar-nav" aria-label="Workspace navigation">{navigation.map((item) => { const Icon = item.icon; const active = pathname === item.href || pathname.startsWith(`${item.href}/`); return <Link key={item.href} href={item.href} onClick={() => setOpen(false)} className={`sidebar-link ${active ? "active" : ""}`} aria-current={active ? "page" : undefined}><Icon size={19} aria-hidden />{item.label}</Link>; })}</nav><div className="sidebar-bottom"><div className="resume-context"><span className="mono">Active resume</span><strong>{state.activeResume}</strong><p>Used for reports and matches</p></div><Progress value={82} label="Profile completion" /></div></aside><div className="workspace-main"><header className="app-header"><div className="cluster"><button className="icon-button mobile-sidebar-button" onClick={() => setOpen(true)} aria-label="Open navigation"><Menu /></button><strong className="app-header-title">{titles[root] || "Career Copilot"}</strong></div><div className="app-header-actions"><span className="demo-banner"><span className="badge badge-warning">Demo</span> Frontend-only data</span><button className="icon-button" aria-label="Search"><Search /></button><button className="icon-button" aria-label="Notifications"><Bell /></button><div style={{ position: "relative" }}><button className="avatar" onClick={() => setProfile(!profile)} aria-expanded={profile} aria-label="Open profile menu">{state.candidate.name.split(" ").map((p) => p[0]).join("").slice(0,2)}</button>{profile && <div className="panel stack" style={{ position: "absolute", right: 0, top: 52, width: 220, zIndex: 80 }}><Link href="/settings/profile">View profile</Link><Link href="/settings/account">Account settings</Link><Link href="/settings/privacy">Privacy</Link><button className="button button-secondary" onClick={logout}>Logout</button></div>}</div></div></header><main id="main-content" className="workspace-content">{children}</main></div></div>;
+}
