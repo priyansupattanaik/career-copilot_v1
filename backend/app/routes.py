@@ -59,7 +59,7 @@ def bootstrap(
     user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     client = client_for(settings, user)
-    profile = client.table("profiles").select("*").eq("id", str(user.id)).single().execute().data
+    profile = recalculate_completion(client, user)
     active_resume = (
         client.table("resumes")
         .select("id,title")
@@ -126,11 +126,52 @@ def bootstrap(
     }
 
 
+def _normalize_token(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _prepare_candidate_payload(resource: str, payload: dict[str, Any], *, require_core: bool) -> dict[str, Any]:
+    data = {key: value for key, value in payload.items() if key not in {"user_id", "id"}}
+    if resource == "skills":
+        if "name" in data or require_core:
+            name = str(data.get("name") or "").strip()
+            if not name:
+                raise ApiError(400, "invalid_skill", "Skill name is required.")
+            data["name"] = name
+            data["normalized_name"] = _normalize_token(str(data.get("normalized_name") or name))
+    elif resource == "languages":
+        if "language" in data or require_core:
+            language = str(data.get("language") or "").strip()
+            if not language:
+                raise ApiError(400, "invalid_language", "Language is required.")
+            data["language"] = language
+            data["normalized_language"] = _normalize_token(str(data.get("normalized_language") or language))
+    elif resource == "experiences" and require_core:
+        if not str(data.get("company_name") or "").strip() or not str(data.get("role_title") or "").strip():
+            raise ApiError(400, "invalid_experience", "Company name and role title are required.")
+    elif resource == "education" and require_core:
+        if not str(data.get("institution") or "").strip():
+            raise ApiError(400, "invalid_education", "Institution is required.")
+    elif resource == "links":
+        if require_core or "link_type" in data or "url" in data:
+            link_type = str(data.get("link_type") or "").strip()
+            url = str(data.get("url") or "").strip()
+            if require_core and (link_type not in {"linkedin", "github", "portfolio", "website", "other"} or not url):
+                raise ApiError(400, "invalid_link", "A valid link type and URL are required.")
+            if link_type:
+                data["link_type"] = link_type
+            if url:
+                data["url"] = url
+    return data
+
+
 @router.get("/profile")
 def get_profile(user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
     client = client_for(settings, user)
+    # Recalculate so the profile page always shows the current completion score.
+    profile = recalculate_completion(client, user)
     return {
-        "profile": client.table("profiles").select("*").eq("id", str(user.id)).single().execute().data,
+        "profile": profile,
         "preferences": client.table("candidate_preferences")
         .select("*")
         .eq("user_id", str(user.id))
@@ -202,7 +243,8 @@ def create_candidate_record(
     if "user_id" in payload or "id" in payload:
         raise ApiError(400, "ownership_field_forbidden", "Ownership fields cannot be supplied.")
     client = client_for(settings, user)
-    result = client.table(table).insert({**payload, "user_id": str(user.id)}).execute().data[0]
+    prepared = _prepare_candidate_payload(resource, payload, require_core=True)
+    result = client.table(table).insert({**prepared, "user_id": str(user.id)}).execute().data[0]
     recalculate_completion(client, user)
     return result
 
@@ -218,13 +260,12 @@ def update_candidate_record(
     table = CANDIDATE_TABLES.get(resource)
     if not table:
         raise ApiError(404, "resource_not_found", "The requested profile resource does not exist.")
-    payload.pop("user_id", None)
-    payload.pop("id", None)
     client = client_for(settings, user)
     owned_row(client, table, record_id, user)
+    prepared = _prepare_candidate_payload(resource, payload, require_core=False)
     result = (
         client.table(table)
-        .update(payload)
+        .update(prepared)
         .eq("id", str(record_id))
         .eq("user_id", str(user.id))
         .execute()
@@ -613,9 +654,44 @@ def confirm_jd(
     return result
 
 
+def _enrich_ats_analysis(client, user: CurrentUser, analysis: dict[str, Any]) -> dict[str, Any]:
+    """Attach the resume version and job description used for a stored ATS run."""
+    enriched = dict(analysis)
+    try:
+        version = owned_row(client, "resume_versions", analysis["resume_version_id"], user)
+        resume = owned_row(client, "resumes", version["resume_id"], user)
+        enriched["resume"] = {
+            "id": resume.get("id"),
+            "title": resume.get("title"),
+            "original_filename": version.get("original_filename"),
+            "version_number": version.get("version_number"),
+            "created_at": version.get("created_at"),
+        }
+    except ApiError:
+        enriched["resume"] = None
+    try:
+        job = owned_row(client, "job_descriptions", analysis["job_description_id"], user)
+        enriched["job_description"] = {
+            "id": job.get("id"),
+            "title": job.get("title"),
+            "company": job.get("company"),
+            "role_title": job.get("role_title"),
+            "input_type": job.get("input_type"),
+            "original_filename": job.get("original_filename"),
+            "created_at": job.get("created_at"),
+        }
+    except ApiError:
+        enriched["job_description"] = None
+    return enriched
+
+
 @router.get("/ats-analyses")
 def list_ats(user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
-    return owned_rows(client_for(settings, user), "ats_analyses", user, "created_at")
+    client = client_for(settings, user)
+    analyses = owned_rows(client, "ats_analyses", user, "created_at")
+    # Newest first for the history view.
+    analyses = list(reversed(analyses))
+    return [_enrich_ats_analysis(client, user, row) for row in analyses]
 
 
 @router.get("/ats-analyses/{analysis_id}")
@@ -624,7 +700,8 @@ def get_ats(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    return owned_row(client_for(settings, user), "ats_analyses", analysis_id, user)
+    client = client_for(settings, user)
+    return _enrich_ats_analysis(client, user, owned_row(client, "ats_analyses", analysis_id, user))
 
 
 @router.post("/ats-analyses", status_code=201)

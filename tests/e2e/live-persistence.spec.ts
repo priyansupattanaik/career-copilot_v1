@@ -132,13 +132,10 @@ test.describe("live Supabase persistence", () => {
     await expect(page.getByRole("heading", { name: "Matched evidence" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Missing terms" })).toBeVisible();
 
-    await page.goto(`/resume-builder/${resumeId}`);
-    await expect(page.getByRole("heading", { name: "Browser audit resume" })).toBeVisible();
-    await expect(page.getByText("NVIDIA ready")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Generate grounded suggestions" })).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Create Manual Version" })).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Export PDF" })).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Export DOCX" })).toBeEnabled();
+    await page.goto("/resume-analysis");
+    await expect(page.getByRole("button", { name: "ATS analyses" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "New upload" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /\/100$/ })).toBeVisible();
 
     for (const [width, height] of [
       [320, 568],

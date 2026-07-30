@@ -1,71 +1,56 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ResumeBuilder } from "./resume-flow";
+import { NewAnalysis } from "./resume-flow";
 
-const mocks = vi.hoisted(() => ({ apiRequest: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  apiRequest: vi.fn(),
+  push: vi.fn(),
+}));
+
 vi.mock("@/lib/api/client", () => ({ apiRequest: mocks.apiRequest }));
-vi.mock("next/navigation", () => ({ useParams: () => ({ resumeId: "resume-1" }) }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mocks.push }),
+  useParams: () => ({}),
+  useSearchParams: () => new URLSearchParams(),
+}));
 
-const resume = {
-  id: "resume-1",
-  title: "Master Resume",
-  is_active: true,
-  created_at: "2026-01-01T00:00:00Z",
-  versions: [{
-    id: "version-1",
-    resume_id: "resume-1",
-    version_number: 1,
-    source_type: "uploaded",
-    extraction_status: "confirmed",
-    structured_content: { sections: { summary: ["Backend engineer"], skills: ["Python, FastAPI"] } },
-    created_at: "2026-01-01T00:00:00Z",
-  }],
-};
+describe("new ATS upload flow", () => {
+  beforeEach(() => {
+    mocks.apiRequest.mockReset();
+    mocks.push.mockReset();
+  });
 
-function arrange(configured: boolean) {
-  mocks.apiRequest.mockImplementation((path: string) => {
-    if (path === "/resumes/resume-1") return Promise.resolve(resume);
-    if (path === "/job-descriptions") return Promise.resolve([]);
-    if (path === "/resume-improvements/capabilities") return Promise.resolve({
-      nvidia_configured: configured,
-      selected_model: configured ? "configured-model" : null,
-      improvement_available: configured,
-      export_formats: ["pdf", "docx"],
-      manual_editing_available: true,
+  it("stores a pasted job description through the API", async () => {
+    mocks.apiRequest.mockResolvedValueOnce({
+      id: "jd-1",
+      title: "Job description",
+      extraction_status: "review_required",
+      structured_content: { sections: { requirements: ["Python", "SQL"] } },
+      raw_text: "Evidence Engineer role requiring Python, SQL, accessibility, and secure data persistence.",
     });
-    throw new Error(`Unexpected request: ${path}`);
+
+    render(<NewAnalysis />);
+    fireEvent.change(screen.getByLabelText("Paste text"), {
+      target: {
+        value: "Evidence Engineer role requiring Python, SQL, accessibility, and secure data persistence.",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Store job description" }));
+
+    await waitFor(() =>
+      expect(mocks.apiRequest).toHaveBeenCalledWith(
+        "/job-descriptions",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    expect(await screen.findByText(/Job description stored/i)).toBeVisible();
   });
-}
 
-describe("resume builder", () => {
-  beforeEach(() => { mocks.apiRequest.mockReset(); });
-
-  it("keeps manual editing and export available when NVIDIA is unavailable", async () => {
-    arrange(false);
-    render(<ResumeBuilder />);
-    expect(await screen.findByRole("heading", { name: "Master Resume" })).toBeVisible();
-    expect(screen.getByText(/AI suggestions are unavailable/i)).toBeVisible();
-    expect(screen.getByRole("button", { name: "Create Manual Version" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Export PDF" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Export DOCX" })).toBeEnabled();
-  });
-
-  it("generates only through the authenticated API when configured", async () => {
-    arrange(true);
-    mocks.apiRequest.mockImplementationOnce(() => Promise.resolve(resume))
-      .mockImplementationOnce(() => Promise.resolve([]))
-      .mockImplementationOnce(() => Promise.resolve({
-        nvidia_configured: true,
-        selected_model: "configured-model",
-        improvement_available: true,
-        export_formats: ["pdf", "docx"],
-        manual_editing_available: true,
-      }))
-      .mockResolvedValueOnce({ run: { id: "run-1" }, suggestions: [], message: "No safe improvements were generated from the available evidence." });
-    render(<ResumeBuilder />);
-    const button = await screen.findByRole("button", { name: "Generate grounded suggestions" });
-    fireEvent.click(button);
-    await waitFor(() => expect(mocks.apiRequest).toHaveBeenCalledWith("/resume-improvements", expect.objectContaining({ method: "POST" })));
-    expect(await screen.findByText(/No safe improvements were generated/i)).toBeVisible();
+  it("shows resume and JD upload options for new analysis", () => {
+    render(<NewAnalysis />);
+    expect(screen.getByRole("heading", { name: "Resume upload" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Job description" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Upload resume" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Upload PDF/DOCX" })).toBeVisible();
   });
 });

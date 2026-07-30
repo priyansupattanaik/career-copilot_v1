@@ -5,6 +5,30 @@ def test_empty_profile_has_no_completion():
     assert calculate_profile_completion({})[0] == 0
 
 
+def test_basic_and_career_partial_completion():
+    percentage, details = calculate_profile_completion(
+        {
+            "profile": {"full_name": "A Candidate", "location": "Pune", "current_role": "Analyst"},
+            "preferences": {"target_roles": ["Analyst"]},
+        }
+    )
+    assert percentage == 30
+    assert details["basic"] == 15
+    assert details["career"] == 15
+
+
+def test_zero_years_experience_counts_without_jobs():
+    percentage, details = calculate_profile_completion(
+        {
+            "profile": {"years_experience": 0},
+            "no_experience_declared": True,
+            "has_experience": False,
+        }
+    )
+    assert details["experience"] == 20
+    assert percentage == 20
+
+
 def test_complete_profile_reaches_one_hundred():
     profile = {
         "full_name": "A Candidate",

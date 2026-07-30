@@ -2,9 +2,15 @@ export type CandidateProfile = {
   id: string;
   full_name: string;
   headline: string | null;
+  bio: string | null;
+  phone: string | null;
   location: string | null;
   current_role: string | null;
+  years_experience: number | null;
+  career_level: string | null;
+  career_goal: string | null;
   profile_completion: number;
+  profile_completion_details: Record<string, number>;
 };
 
 export type ApiFailure = {

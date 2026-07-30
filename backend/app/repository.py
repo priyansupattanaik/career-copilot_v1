@@ -76,10 +76,16 @@ def recalculate_completion(client, user: CurrentUser) -> dict[str, Any]:
         client.table("candidate_preferences").select("*").eq("user_id", str(user.id)).single().execute().data
         or {}
     )
+    years = profile.get("years_experience")
+    try:
+        no_experience_declared = years is not None and float(years) == 0
+    except (TypeError, ValueError):
+        no_experience_declared = False
     context = {
         "profile": profile,
         "preferences": preferences,
         "has_experience": bool(owned_rows(client, "candidate_experiences", user)),
+        "no_experience_declared": no_experience_declared,
         "skill_count": len(owned_rows(client, "candidate_skills", user)),
         "education_count": len(owned_rows(client, "candidate_education", user)),
         "link_count": len(owned_rows(client, "candidate_links", user)),
