@@ -127,8 +127,32 @@ def write_activity(
         logger.warning("activity_write_failed operation=%s user_id=%s", event_type, user.id)
 
 
-def recalculate_completion(client, user: CurrentUser) -> dict[str, Any]:
+def sync_profile_from_auth_metadata(client, user: CurrentUser) -> dict[str, Any]:
+    """
+    Ensure profiles.full_name is populated from Auth user_metadata when empty.
+    Sign-up stores full_name in raw_user_meta_data; the DB trigger should copy it,
+    but onboarding must still work if the profile row is blank.
+    """
     profile = client.table("profiles").select("*").eq("id", str(user.id)).single().execute().data or {}
+    auth_name = (user.full_name or "").strip()
+    existing = str(profile.get("full_name") or "").strip()
+    if auth_name and not existing:
+        updated = (
+            client.table("profiles")
+            .update({"full_name": auth_name[:120]})
+            .eq("id", str(user.id))
+            .execute()
+            .data
+        )
+        if updated:
+            return updated[0]
+        profile = {**profile, "full_name": auth_name[:120]}
+    return profile
+
+
+def recalculate_completion(client, user: CurrentUser) -> dict[str, Any]:
+    # Keep full_name in sync with sign-up metadata before scoring completion.
+    profile = sync_profile_from_auth_metadata(client, user)
     preferences = (
         client.table("candidate_preferences").select("*").eq("user_id", str(user.id)).single().execute().data
         or {}

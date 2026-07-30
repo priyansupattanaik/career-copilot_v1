@@ -5,7 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.errors import ApiError
-from app.nvidia_client import NvidiaClient
+from app.agents.llm import NvidiaClient
 
 VALID = {
     "suggestions": [

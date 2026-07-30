@@ -26,7 +26,14 @@ from app.account_deletion import (
     email_matches_account,
     purge_user_storage,
 )
-from app.profile_from_resume import build_profile_draft, draft_counts
+from app.avatars import (
+    attach_avatar_url,
+    avatar_extension_for_mime,
+    signed_avatar_url,
+    validate_avatar_upload,
+)
+from app.agents.interview import generate_interview_questions
+from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
 from app.repository import (
     CANDIDATE_TABLES,
     client_for,
@@ -71,6 +78,7 @@ def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "service": settings.app_name,
         "supabase_configured": settings.supabase_configured,
         "nvidia_configured": settings.nvidia_configured,
+        "groq_configured": settings.groq_configured,
     }
 
 
@@ -175,7 +183,7 @@ def bootstrap(
         or 0
     )
     return {
-        "profile": profile,
+        "profile": attach_avatar_url(profile, client, settings),
         "active_resume": active_resume[0] if active_resume else None,
         "active_job_description": latest_jd[0] if latest_jd else None,
         "latest_ats_analysis": latest_analysis[0] if latest_analysis else None,
@@ -193,8 +201,10 @@ def bootstrap(
         "capabilities": {
             "ats_scoring": True,
             "interview_evaluation": False,
+            "interview_questions": settings.groq_configured,
             "job_recommendations": False,
             "nvidia_configured": settings.nvidia_configured,
+            "groq_configured": settings.groq_configured,
         },
     }
 
@@ -398,7 +408,7 @@ def get_profile(user: CurrentUser = Depends(get_current_user), settings: Setting
     # Recalculate so the profile page always shows the current completion score.
     profile = recalculate_completion(client, user)
     return {
-        "profile": profile,
+        "profile": attach_avatar_url(profile, client, settings),
         "preferences": client.table("candidate_preferences")
         .select("*")
         .eq("user_id", str(user.id))
@@ -418,7 +428,116 @@ def update_profile(
     client.table("profiles").update(payload.model_dump(exclude_none=True)).eq("id", str(user.id)).execute()
     profile = recalculate_completion(client, user)
     write_activity(client, user, "profile_updated", "Candidate profile updated", "profile", str(user.id))
-    return profile
+    return attach_avatar_url(profile, client, settings)
+
+
+@router.post("/profile/avatar")
+async def upload_profile_avatar(
+    file: UploadFile = File(...),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Upload or replace the candidate profile picture.
+    Max size: settings.avatar_max_bytes (3 MB). JPEG / PNG / WebP only.
+    Stores path on profiles.avatar_path and returns a short-lived signed URL.
+    """
+    client = client_for(settings, user)
+    raw = await file.read()
+    mime = validate_avatar_upload(
+        file.filename, file.content_type, raw, settings.avatar_max_bytes
+    )
+    ext = avatar_extension_for_mime(mime)
+    new_path = f"{user.id}/avatars/{uuid.uuid4()}{ext}"
+
+    current = (
+        client.table("profiles")
+        .select("avatar_path")
+        .eq("id", str(user.id))
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    old_path = (current[0].get("avatar_path") if current else None) or None
+
+    try:
+        client.storage.from_(settings.avatar_bucket).upload(
+            new_path,
+            raw,
+            {"content-type": mime, "upsert": "false"},
+        )
+    except Exception as exc:
+        raise ApiError(500, "avatar_upload_failed", "The profile picture could not be stored.") from exc
+
+    try:
+        updated = (
+            client.table("profiles")
+            .update({"avatar_path": new_path})
+            .eq("id", str(user.id))
+            .execute()
+            .data
+        )
+        if not updated:
+            raise ApiError(500, "avatar_profile_update_failed", "The profile picture path could not be saved.")
+    except ApiError:
+        try:
+            client.storage.from_(settings.avatar_bucket).remove([new_path])
+        except Exception:
+            pass
+        raise
+    except Exception as exc:
+        try:
+            client.storage.from_(settings.avatar_bucket).remove([new_path])
+        except Exception:
+            pass
+        raise ApiError(500, "avatar_profile_update_failed", "The profile picture path could not be saved.") from exc
+
+    if old_path and old_path != new_path:
+        try:
+            client.storage.from_(settings.avatar_bucket).remove([old_path])
+        except Exception:
+            pass
+
+    profile = recalculate_completion(client, user)
+    write_activity(
+        client, user, "avatar_updated", "Profile picture updated", "profile", str(user.id)
+    )
+    return {
+        "profile": attach_avatar_url(profile, client, settings),
+        "avatar_path": new_path,
+        "avatar_url": signed_avatar_url(client, settings, new_path),
+        "max_bytes": settings.avatar_max_bytes,
+        "expires_in": settings.export_signed_url_seconds,
+    }
+
+
+@router.delete("/profile/avatar", status_code=204)
+def delete_profile_avatar(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Remove the candidate profile picture from storage and clear profiles.avatar_path."""
+    client = client_for(settings, user)
+    rows = (
+        client.table("profiles")
+        .select("avatar_path")
+        .eq("id", str(user.id))
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    path = (rows[0].get("avatar_path") if rows else None) or None
+    client.table("profiles").update({"avatar_path": None}).eq("id", str(user.id)).execute()
+    if path:
+        try:
+            client.storage.from_(settings.avatar_bucket).remove([path])
+        except Exception:
+            pass
+    write_activity(
+        client, user, "avatar_removed", "Profile picture removed", "profile", str(user.id)
+    )
 
 
 @router.put("/profile/preferences")
@@ -573,29 +692,15 @@ def _load_resume_version_for_profile_fill(
     return version
 
 
-def _profile_draft_response(
-    plain_text: str,
-    structured: dict[str, Any],
-    version_meta: dict[str, Any],
-) -> dict[str, Any]:
-    draft = build_profile_draft(plain_text, structured)
-    return {
-        "draft": draft,
-        "counts": draft_counts(draft),
-        "resume": version_meta,
-        "disclaimer": "Review every field before applying. Values are derived only from resume text.",
-    }
-
-
 @router.post("/profile/from-resume/preview")
-def preview_profile_from_resume(
+async def preview_profile_from_resume(
     payload: ProfileFromResumePreviewRequest | None = Body(default=None),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
     """
     Build a reviewable profile draft from a stored resume version.
-    Pass resume_version_id or omit to use the latest confirmed/stored resume with text.
+    Uses NVIDIA structured extraction when configured, plus deterministic mapping.
     Does not write profile tables until /profile/from-resume/apply.
     """
     client = client_for(settings, user)
@@ -605,9 +710,13 @@ def preview_profile_from_resume(
     structured = version.get("structured_content") or {}
     if not isinstance(structured, dict) or not structured.get("sections"):
         structured = extract_sections(plain_text)
-    return _profile_draft_response(
+    draft = await build_profile_draft_enriched(
         plain_text,
         structured if isinstance(structured, dict) else {},
+        settings,
+    )
+    return profile_draft_response_payload(
+        draft,
         {
             "id": version.get("id"),
             "resume_id": version.get("resume_id"),
@@ -625,8 +734,8 @@ async def preview_profile_from_resume_upload(
     settings: Settings = Depends(get_settings),
 ):
     """
-    Build a reviewable profile draft from an uploaded PDF/DOCX without requiring
-    a prior resume library entry. Does not write profile tables.
+    Build a reviewable profile draft from an uploaded PDF/DOCX.
+    Uses NVIDIA structured extraction when configured, plus deterministic mapping.
     """
     raw = await file.read()
     mime = validate_document(
@@ -634,9 +743,9 @@ async def preview_profile_from_resume_upload(
     )
     plain_text = extract_text(raw, mime)
     structured = extract_sections(plain_text)
-    return _profile_draft_response(
-        plain_text,
-        structured,
+    draft = await build_profile_draft_enriched(plain_text, structured, settings)
+    return profile_draft_response_payload(
+        draft,
         {
             "id": None,
             "original_filename": safe_filename(file.filename or "resume"),
@@ -1834,14 +1943,39 @@ def create_interview(
     )
 
 
-@router.post("/interviews/{session_id}/start")
-def start_interview(
+@router.get("/interviews/{session_id}")
+def get_interview(
     session_id: UUID,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
     client = client_for(settings, user)
-    owned_row(client, "interview_sessions", session_id, user)
+    session = owned_row(client, "interview_sessions", session_id, user)
+    questions = (
+        client.table("interview_questions")
+        .select("id,position,question,question_type,created_at")
+        .eq("session_id", str(session_id))
+        .eq("user_id", str(user.id))
+        .order("position")
+        .execute()
+        .data
+        or []
+    )
+    return {"session": session, "questions": questions}
+
+
+@router.post("/interviews/{session_id}/start")
+async def start_interview(
+    session_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Start a session and generate practice questions via Groq (dedicated task).
+    NVIDIA is not used here and is never a fallback for this path.
+    """
+    client = client_for(settings, user)
+    session = owned_row(client, "interview_sessions", session_id, user)
     result = (
         client.table("interview_sessions")
         .update({"status": "in_progress", "started_at": utc_now()})
@@ -1850,10 +1984,66 @@ def start_interview(
         .execute()
         .data[0]
     )
+
+    existing = (
+        client.table("interview_questions")
+        .select("id")
+        .eq("session_id", str(session_id))
+        .eq("user_id", str(user.id))
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    questions_payload: dict[str, Any] = {"questions": [], "provider": None, "model": None}
+    if not existing:
+        count = int(session.get("question_count") or 3)
+        questions_payload = await generate_interview_questions(
+            settings,
+            mode=str(session.get("mode") or "mixed"),
+            count=count,
+            target_role=session.get("target_role"),
+            target_company=session.get("target_company"),
+            difficulty=session.get("difficulty"),
+            topic=session.get("topic"),
+        )
+        rows = []
+        for index, item in enumerate(questions_payload.get("questions") or [], start=1):
+            rows.append(
+                {
+                    "user_id": str(user.id),
+                    "session_id": str(session_id),
+                    "position": index,
+                    "question": str(item.get("question") or "").strip()[:800],
+                    "question_type": (item.get("question_type") or session.get("mode") or "mixed")[:80],
+                    "source_context": {
+                        "provider": questions_payload.get("provider"),
+                        "model": questions_payload.get("model"),
+                    },
+                }
+            )
+        if rows:
+            client.table("interview_questions").insert(rows).execute()
+
+    questions = (
+        client.table("interview_questions")
+        .select("id,position,question,question_type,created_at")
+        .eq("session_id", str(session_id))
+        .eq("user_id", str(user.id))
+        .order("position")
+        .execute()
+        .data
+        or []
+    )
     write_activity(
         client, user, "interview_started", "Interview session started", "interview_session", str(session_id)
     )
-    return result
+    return {
+        "session": result,
+        "questions": questions,
+        "question_provider": questions_payload.get("provider"),
+        "question_model": questions_payload.get("model"),
+    }
 
 
 @router.post("/interviews/{session_id}/responses", status_code=201)

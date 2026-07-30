@@ -195,7 +195,38 @@ p { color: var(--muted); line-height: 1.6; font-size: var(--text-md); margin-bot
 .app-header-title { font-size: var(--text-md); font-weight: 700; }
 .app-header-actions { display: flex; align-items: center; gap: 8px; }
 .icon-button { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 10px; background: #fff; box-shadow: var(--shadow-sm); }
-.avatar { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 999px; background: var(--warning); font-weight: 700; font-size: var(--text-sm); }
+.avatar {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--warning);
+  font-weight: 700;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  padding: 0;
+}
+.avatar-image { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-avatar-preview {
+  width: 88px;
+  height: 88px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-blue);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+.profile-avatar-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.profile-avatar-fallback {
+  font-weight: 750;
+  font-size: var(--text-lg);
+  font-family: var(--font-mono), monospace;
+  color: var(--primary-dark);
+}
 .mobile-sidebar-button { display: none; }
 .workspace-content { padding: clamp(18px, 3vw, 32px); max-width: 1500px; margin: 0 auto; font-size: var(--text-md); }
 .demo-banner { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border)); border-radius: 10px; background: #fff6cf; font-family: var(--font-mono); font-size: var(--text-xs); }

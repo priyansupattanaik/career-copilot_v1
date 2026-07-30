@@ -8,7 +8,7 @@ from app.auth import CurrentUser
 from app.config import Settings
 from app.documents import DOCX_MIME, sha256_bytes
 from app.errors import ApiError
-from app.nvidia_client import NvidiaClient
+from app.agents.llm import NvidiaClient
 from app.repository import owned_row, write_activity
 from app.resume_evidence import ResumeBlock, build_blocks, evidence_bundle
 from app.resume_exports import render_docx

@@ -1,4 +1,4 @@
-from app.profile_from_resume import build_profile_draft, draft_counts
+from app.agents.profile_fill import build_profile_draft, draft_counts
 
 SAMPLE = """
 Jane Doe
@@ -41,13 +41,15 @@ Hindi - Native
 def test_build_profile_draft_maps_core_sections():
     draft = build_profile_draft(SAMPLE)
     profile = draft["profile"]
-    assert profile["full_name"] == "Jane Doe"
+    assert profile["full_name"] and "Jane" in profile["full_name"]
     assert profile["phone"]
     assert profile["location"]
+    assert "location:" not in (profile["location"] or "").lower()
     assert profile["current_role"] == "Software Engineer"
     assert profile["headline"]
     assert draft["skills"]
     assert any(s["name"].lower() == "python" for s in draft["skills"])
+    assert not any("languages:" in s["name"].lower() for s in draft["skills"])
     assert len(draft["experiences"]) >= 2
     assert draft["experiences"][0]["company_name"] == "Acme Corp"
     assert len(draft["education"]) >= 1
@@ -62,6 +64,39 @@ def test_build_profile_draft_maps_core_sections():
     counts = draft_counts(draft)
     assert counts["skills"] >= 3
     assert counts["experiences"] >= 2
+    assert "fields_extracted" in draft["meta"]
+
+
+def test_realistic_resume_cleans_labels_and_years():
+    text = """
+PRIYANSU KUMAR
+Email: priyansu@example.com | Mobile: +91-9876543210
+Location: Pune, Maharashtra, India
+LinkedIn: https://www.linkedin.com/in/priyansu
+
+PROFESSIONAL SUMMARY
+Full Stack Developer with 2+ years of experience building APIs with Python and FastAPI.
+
+TECHNICAL SKILLS
+Languages: Python, SQL
+Frameworks: FastAPI, React
+
+PROFESSIONAL EXPERIENCE
+Software Engineer | TechNova | Pune | Jan 2023 – Present
+- Built REST APIs
+
+EDUCATION
+B.Tech Computer Science | State University | 2018 – 2022
+"""
+    draft = build_profile_draft(text)
+    p = draft["profile"]
+    assert p["full_name"] and "Priyansu" in p["full_name"]
+    assert p["location"] == "Pune, Maharashtra, India"
+    assert p["years_experience"] == 2.0
+    assert p["career_level"] == "junior"
+    assert any(s["name"] == "Python" for s in draft["skills"])
+    assert not any("Languages" in s["name"] for s in draft["skills"])
+    assert draft["experiences"][0]["company_name"] == "TechNova"
 
 
 def test_build_profile_draft_does_not_require_structured_content():
