@@ -42,7 +42,17 @@ type Analysis = {
   status: string;
   overall_score: number | null;
   score_breakdown?: { matched_terms?: string[]; missing_terms?: string[]; total_terms?: number };
-  summary?: { method?: string; disclaimer?: string; matched?: number; total?: number };
+  summary?: {
+    method?: string;
+    disclaimer?: string;
+    matched?: number;
+    missing?: number;
+    total?: number;
+    missing_terms?: string[];
+    overall_inference?: string;
+    focus_areas?: string[];
+    inference_provider?: string;
+  };
   created_at: string;
   resume_version_id?: string;
   job_description_id?: string;
@@ -101,9 +111,11 @@ type ResumePreview = {
     size_bytes?: number;
     plain_text?: string;
     structured_content?: StructuredContent;
+    content_edited?: boolean;
   };
   download_url?: string | null;
   expires_in?: number;
+  prefer_rendered_pdf?: boolean;
 };
 
 function formatDate(value?: string | null) {
@@ -187,6 +199,12 @@ export function AnalysisHistory() {
   );
 }
 
+function isPdfMimeOrName(mime?: string | null, filename?: string | null) {
+  const m = (mime || "").toLowerCase();
+  const name = (filename || "").toLowerCase();
+  return m.includes("pdf") || name.endsWith(".pdf");
+}
+
 function ResumeLibrary() {
   const [resumes, setResumes] = useState<ResumeListItem[]>([]);
   const [error, setError] = useState("");
@@ -194,7 +212,9 @@ function ResumeLibrary() {
   const [loading, setLoading] = useState(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [preview, setPreview] = useState<ResumePreview | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
 
   async function loadResumes() {
     const rows = await apiRequest<ResumeListItem[]>("/resumes");
@@ -216,17 +236,70 @@ function ResumeLibrary() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!preview) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setPreview(null);
+        setPdfUrl(null);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [preview]);
+
+  async function resolvePdfPreviewUrl(data: ResumePreview): Promise<string> {
+    // After in-place edits, original upload is stale — show PDF rendered from current content.
+    const useRendered =
+      data.prefer_rendered_pdf ||
+      data.version.content_edited ||
+      !isPdfMimeOrName(data.version.mime_type, data.version.original_filename);
+
+    if (!useRendered && data.download_url) {
+      return data.download_url;
+    }
+    if (!data.version.id) {
+      throw new Error("This resume has no version to preview as PDF.");
+    }
+    const created = await apiRequest<{ id: string }>(`/resume-versions/${data.version.id}/exports`, {
+      method: "POST",
+      body: JSON.stringify({ format: "pdf" }),
+    });
+    const download = await apiRequest<{ download_url?: string }>(`/resume-exports/${created.id}/download`);
+    if (!download.download_url) {
+      throw new Error("PDF preview link could not be created.");
+    }
+    return download.download_url;
+  }
+
   async function openPreview(resumeId: string) {
     setPreviewLoading(true);
+    setPreviewLoadingId(resumeId);
     setError("");
+    setPdfUrl(null);
     try {
       const data = await apiRequest<ResumePreview>(`/resumes/${resumeId}/preview`);
+      const url = await resolvePdfPreviewUrl(data);
       setPreview(data);
+      setPdfUrl(url);
     } catch (reason) {
+      setPreview(null);
+      setPdfUrl(null);
       setError((reason as Error).message);
     } finally {
       setPreviewLoading(false);
+      setPreviewLoadingId(null);
     }
+  }
+
+  function closePreview() {
+    setPreview(null);
+    setPdfUrl(null);
   }
 
   async function deleteResume(resumeId: string, title: string) {
@@ -237,7 +310,7 @@ function ResumeLibrary() {
     try {
       await apiRequest(`/resumes/${resumeId}`, { method: "DELETE" });
       setResumes((current) => current.filter((row) => row.id !== resumeId));
-      if (preview?.resume.id === resumeId) setPreview(null);
+      if (preview?.resume.id === resumeId) closePreview();
       setMessage("Resume deleted.");
     } catch (reason) {
       setError((reason as Error).message);
@@ -253,8 +326,6 @@ function ResumeLibrary() {
       </Card>
     );
   }
-
-  const sections = (preview?.version.structured_content?.sections || {}) as Record<string, string[]>;
 
   return (
     <div className="stack">
@@ -300,8 +371,12 @@ function ResumeLibrary() {
               <Badge tone={resume.is_active ? "success" : "info"}>{resume.is_active ? "Active" : "Stored"}</Badge>
             </div>
             <div className="cluster">
-              <Button variant="secondary" disabled={previewLoading} onClick={() => openPreview(resume.id)}>
-                {previewLoading ? "Loading…" : "Preview"}
+              <Button
+                variant="secondary"
+                disabled={previewLoading}
+                onClick={() => openPreview(resume.id)}
+              >
+                {previewLoading && previewLoadingId === resume.id ? "Loading PDF…" : "Preview"}
               </Button>
               <Button
                 variant="danger"
@@ -315,43 +390,42 @@ function ResumeLibrary() {
         ))
       )}
 
-      {preview && (
-        <Card className="stack">
-          <div className="row">
-            <div>
-              <p className="eyebrow">Resume preview</p>
-              <h2 style={{ margin: 0 }}>{preview.resume.title}</h2>
-              <p style={{ margin: "6px 0 0" }}>
-                {preview.version.original_filename || "Stored file"}
-                {preview.version.version_number != null ? ` · v${preview.version.version_number}` : ""}
-              </p>
-            </div>
-            <div className="cluster">
-              {preview.download_url && (
-                <a className="button button-secondary" href={preview.download_url} target="_blank" rel="noreferrer">
-                  Open original file
-                </a>
-              )}
-              <Button variant="secondary" onClick={() => setPreview(null)}>
-                Close preview
+      {preview && pdfUrl ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={closePreview}
+        >
+          <div
+            className="modal-panel modal-panel-wide"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`PDF preview: ${preview.resume.title}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow" style={{ margin: 0 }}>
+                  Resume PDF
+                </p>
+                <h2>{preview.resume.title}</h2>
+                <p className="muted" style={{ margin: "4px 0 0", fontSize: "var(--text-sm)" }}>
+                  {preview.version.original_filename || "Stored file"}
+                  {preview.version.version_number != null ? ` · v${preview.version.version_number}` : ""}
+                </p>
+              </div>
+              <Button variant="secondary" onClick={closePreview}>
+                Close
               </Button>
             </div>
+            <iframe
+              className="pdf-frame"
+              title={`Resume PDF — ${preview.resume.title}`}
+              src={pdfUrl}
+            />
           </div>
-          {Object.keys(sections).length > 0 ? (
-            Object.entries(sections).map(([section, lines]) => (
-              <div key={section}>
-                <strong style={{ textTransform: "capitalize" }}>{section.replaceAll("_", " ")}</strong>
-                <SectionEntries lines={lines} />
-              </div>
-            ))
-          ) : (
-            <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-              {(preview.version.plain_text || "No extracted text available for preview.").slice(0, 4000)}
-              {(preview.version.plain_text || "").length > 4000 ? "…" : ""}
-            </p>
-          )}
-        </Card>
-      )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -874,19 +948,33 @@ export function AtsReport() {
     );
   }
 
-  const matched = evidence.filter((item) => item.match_status === "strong_match");
   const missing = evidence.filter((item) => item.match_status === "not_found");
+  const missingTerms =
+    analysis.summary?.missing_terms?.length
+      ? analysis.summary.missing_terms
+      : analysis.score_breakdown?.missing_terms?.length
+        ? analysis.score_breakdown.missing_terms
+        : missing.map((item) => item.requirement_text).filter(Boolean);
+  const total = analysis.summary?.total ?? evidence.length;
+  const matchedCount = analysis.summary?.matched ?? Math.max(0, total - missingTerms.length);
+  const overallInference = analysis.summary?.overall_inference || "";
+  const focusAreas = analysis.summary?.focus_areas || [];
 
   return (
     <div className="stack">
       <PageHeader
         eyebrow="ATS keyword coverage"
         title={`${analysis.overall_score ?? 0}/100`}
-        description="A deterministic comparison of confirmed resume text against confirmed job-description terms."
+        description="Exact keyword coverage vs the job description. Missing terms and an overall improvement brief only."
         action={
-          <Link className="button button-secondary" href="/resume-analysis?tab=upload">
-            New analysis
-          </Link>
+          <div className="cluster">
+            <Link className="button button-primary" href={`/resume-analysis/report/${params.reportId}/edit`}>
+              Edit resume to improve score
+            </Link>
+            <Link className="button button-secondary" href="/resume-analysis?tab=upload">
+              New analysis
+            </Link>
+          </div>
         }
       />
       <Card className="stack">
@@ -901,60 +989,74 @@ export function AtsReport() {
           </div>
         </div>
         <p style={{ margin: 0 }}>Analyzed {formatDate(analysis.created_at)}</p>
+        <div className="cluster">
+          <Link className="button button-primary" href={`/resume-analysis/report/${params.reportId}/edit`}>
+            Edit resume to improve score
+          </Link>
+        </div>
       </Card>
       <Card className="stack panel-blue">
         <Progress value={analysis.overall_score || 0} label="JD keyword coverage" />
         <p>
-          <strong>{matched.length}</strong> matched and <strong>{missing.length}</strong> missing across {evidence.length}{" "}
-          scored terms.
+          <strong>{missingTerms.length}</strong> missing of <strong>{total || "—"}</strong> scored terms
+          {matchedCount != null ? ` (${matchedCount} matched)` : ""}.
         </p>
-        <p>{analysis.summary?.disclaimer || "Coverage evidence is not a hiring prediction."}</p>
+        <p>{analysis.summary?.disclaimer || "Keyword coverage is not a hiring prediction."}</p>
       </Card>
-      <div className="grid-2">
-        <Card className="stack">
-          <h2>Matched evidence</h2>
-          {matched.length ? (
-            matched.map((item) => (
-              <div className="suggestion stack" key={item.id} style={{ gap: 6 }}>
-                <strong style={{ textTransform: "none" }}>Keyword: {item.requirement_text}</strong>
-                {item.resume_evidence_text ? (
-                  <span>
-                    <strong>Evidence: </strong>
-                    {item.resume_evidence_text}
-                  </span>
-                ) : (
-                  <span className="muted">No single resume line isolated for this keyword.</span>
-                )}
-                <span>
-                  <strong>AI inference: </strong>
-                  {(item.explanation || "").replace(/^AI inference:\s*/i, "") ||
-                    "This keyword is present in confirmed resume text."}
-                </span>
-              </div>
-            ))
-          ) : (
-            <p>No scored JD term was found in the confirmed resume.</p>
-          )}
-        </Card>
-        <Card className="stack">
-          <h2>Missing keywords</h2>
-          {missing.length ? (
-            <div className="cluster" style={{ gap: 8 }}>
-              {missing.map((item) => (
-                <Badge key={item.id} tone="warning">
-                  {item.requirement_text}
-                </Badge>
+      <Card className="stack">
+        <h2 style={{ margin: 0 }}>Missing keywords</h2>
+        {missingTerms.length ? (
+          <div className="cluster" style={{ gap: 8 }}>
+            {missingTerms.map((term) => (
+              <Badge key={term} tone="warning">
+                {term}
+              </Badge>
+            ))}
+          </div>
+        ) : (
+          <p style={{ margin: 0 }}>No scored JD terms are missing.</p>
+        )}
+        <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
+          Next: open the editor to add only true keywords, rewrite sections, apply AI suggestions, export PDF/DOCX, then
+          re-run ATS against this job description.
+        </p>
+        <div className="cluster">
+          <Link className="button button-primary" href={`/resume-analysis/report/${params.reportId}/edit`}>
+            Edit resume to improve score
+          </Link>
+        </div>
+      </Card>
+      <Card className="stack">
+        <h2 style={{ margin: 0 }}>Overall improvement inference</h2>
+        {overallInference ? (
+          <div className="suggestion" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+            {overallInference}
+          </div>
+        ) : (
+          <p className="muted" style={{ margin: 0 }}>
+            No improvement brief was stored for this analysis. Run a new analysis after restarting the API.
+          </p>
+        )}
+        {focusAreas.length > 0 ? (
+          <div className="stack" style={{ gap: 6 }}>
+            <strong>Focus areas (from missing keywords)</strong>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {focusAreas.map((area) => (
+                <li key={area}>{area}</li>
               ))}
-            </div>
-          ) : (
-            <p>No scored JD terms are missing.</p>
-          )}
-        </Card>
-      </div>
+            </ul>
+          </div>
+        ) : null}
+        {analysis.summary?.inference_provider ? (
+          <p className="muted mono" style={{ margin: 0, fontSize: "var(--text-xs)" }}>
+            Brief source: {analysis.summary.inference_provider}
+          </p>
+        ) : null}
+      </Card>
       <Card>
         <p className="muted">
           Method: {analysis.summary?.method || "Deterministic normalized keyword coverage"}. Matching is exact after
-          normalization, so it remains auditable and does not invent candidate experience.
+          normalization. Improvement text is limited to missing keywords and must not invent experience.
         </p>
       </Card>
     </div>

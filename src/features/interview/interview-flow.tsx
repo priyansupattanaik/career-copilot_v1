@@ -25,11 +25,38 @@ type Question = {
 export function InterviewHome() {
   const [data, setData] = useState<Session[]>([]);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function loadSessions() {
+    const rows = await apiRequest<Session[]>("/interviews");
+    setData(rows);
+  }
+
   useEffect(() => {
-    apiRequest<Session[]>("/interviews")
-      .then(setData)
-      .catch((e: Error) => setError(e.message));
+    loadSessions().catch((e: Error) => setError(e.message));
   }, []);
+
+  async function deleteSession(session: Session) {
+    const label = session.target_role || session.mode || "this";
+    const ok = window.confirm(
+      `Delete the ${label} interview session permanently? Questions and answers will be removed from your account.`,
+    );
+    if (!ok) return;
+    setDeletingId(session.id);
+    setError("");
+    setMessage("");
+    try {
+      await apiRequest(`/interviews/${session.id}`, { method: "DELETE" });
+      setData((current) => current.filter((row) => row.id !== session.id));
+      setMessage("Interview session deleted.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -42,16 +69,34 @@ export function InterviewHome() {
           </a>
         }
       />
-      {error && <p className="field-error">{error}</p>}
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+      {message && (
+        <p role="status" style={{ margin: 0 }}>
+          {message}
+        </p>
+      )}
       {data.map((s) => (
         <Card key={s.id} className="stack">
           <h2 style={{ margin: 0 }}>{s.target_role || s.mode} interview</h2>
           <p style={{ margin: 0 }}>
             {s.mode} · {s.status}
           </p>
-          <a className="button button-secondary" href={`/mock-interview/session/${s.id}`}>
-            Open session
-          </a>
+          <div className="cluster">
+            <a className="button button-secondary" href={`/mock-interview/session/${s.id}`}>
+              Open session
+            </a>
+            <Button
+              variant="danger"
+              disabled={deletingId === s.id}
+              onClick={() => void deleteSession(s)}
+            >
+              {deletingId === s.id ? "Deleting…" : "Delete"}
+            </Button>
+          </div>
         </Card>
       ))}
       {!error && data.length === 0 && (
@@ -148,6 +193,7 @@ export function InterviewSetup() {
 }
 
 export function InterviewSession() {
+  const router = useRouter();
   const params = useParams();
   const sessionId = String(params?.sessionId || "");
   const [session, setSession] = useState<Session | null>(null);
@@ -158,6 +204,7 @@ export function InterviewSession() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -218,6 +265,23 @@ export function InterviewSession() {
     }
   }
 
+  async function deleteThisSession() {
+    const ok = window.confirm(
+      "Delete this interview session permanently? Questions and answers will be removed from your account.",
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await apiRequest(`/interviews/${sessionId}`, { method: "DELETE" });
+      router.replace("/mock-interview");
+      router.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+      setDeleting(false);
+    }
+  }
+
   if (loading) {
     return (
       <Card>
@@ -271,12 +335,22 @@ export function InterviewSession() {
             >
               Next
             </Button>
-            <Button variant="secondary" disabled={saving} onClick={() => void completeSession()}>
+            <Button variant="secondary" disabled={saving || deleting} onClick={() => void completeSession()}>
               Complete session
+            </Button>
+            <Button variant="danger" disabled={saving || deleting} onClick={() => void deleteThisSession()}>
+              {deleting ? "Deleting…" : "Delete session"}
             </Button>
           </div>
         </Card>
       )}
+      {questions.length === 0 ? (
+        <div className="cluster" style={{ marginTop: 12 }}>
+          <Button variant="danger" disabled={deleting} onClick={() => void deleteThisSession()}>
+            {deleting ? "Deleting…" : "Delete session"}
+          </Button>
+        </div>
+      ) : null}
     </>
   );
 }

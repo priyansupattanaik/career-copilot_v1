@@ -125,3 +125,44 @@ def test_export_renderers_use_canonical_structured_content():
     assert any("Backend engineer" in paragraph.text for paragraph in document.paragraphs)
     assert pdf_bytes.startswith(b"%PDF-")
     assert "FastAPI" in _plain_text(STRUCTURED)
+
+
+def test_merge_structured_preserves_unclassified_and_extra_sections():
+    from app.resume_improvements import _merge_structured_preserve_identity
+
+    source = {
+        "schema_version": "resume-extraction-v1",
+        "sections": {
+            "summary": ["Backend engineer."],
+            "skills": ["Python"],
+            "awards": ["Hackathon finalist"],
+        },
+        "unclassified_blocks": ["Ada Lovelace", "ada@example.test"],
+    }
+    incoming = {
+        "sections": {
+            "summary": ["Backend engineer building reliable APIs."],
+            "skills": ["Python", "FastAPI"],
+        },
+        "unclassified_blocks": ["Ada Lovelace", "ada@example.test"],
+    }
+    merged = _merge_structured_preserve_identity(source, incoming)
+    assert merged["sections"]["summary"] == ["Backend engineer building reliable APIs."]
+    assert merged["sections"]["skills"] == ["Python", "FastAPI"]
+    # Extra section from the original resume is not dropped when editor omits it.
+    assert merged["sections"]["awards"] == ["Hackathon finalist"]
+    assert merged["unclassified_blocks"] == ["Ada Lovelace", "ada@example.test"]
+
+    cleared = _merge_structured_preserve_identity(
+        source,
+        {
+            "sections": {
+                "summary": ["Backend engineer building reliable APIs."],
+                "skills": [],
+                "awards": ["Hackathon finalist"],
+            },
+            "unclassified_blocks": ["Ada Lovelace", "ada@example.test"],
+        },
+    )
+    assert "skills" not in cleared["sections"]
+    assert cleared["sections"]["awards"] == ["Hackathon finalist"]

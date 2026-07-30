@@ -90,9 +90,14 @@ def test_match_section_heading_aliases():
     assert match_section_heading("Personal Projects") == "projects"
     assert match_section_heading("Work History") == "experience"
     assert match_section_heading("Professional Summary") == "summary"
+    assert match_section_heading("## Skills") == "skills"
+    assert match_section_heading("3. Projects") == "projects"
     # Sentences must not become headings
     assert match_section_heading("I have strong experience with Python and APIs.") is None
     assert match_section_heading("Built projects using FastAPI and React") is None
+    # Ambiguous single words that used to false-positive are not headings alone
+    assert match_section_heading("Work") is None
+    assert match_section_heading("Project") is None
 
 
 def test_extract_sections_separates_experience_projects_and_skills():
@@ -167,3 +172,57 @@ Inventory Tracker | Academic
     assert len(sections["projects"]) == 2
     assert "Career Copilot" in sections["projects"][0]
     assert "Inventory Tracker" in sections["projects"][1]
+
+
+def test_skills_never_absorb_projects_or_experience():
+    text = """
+TECHNICAL SKILLS
+Python, FastAPI, SQL, Docker
+
+WORK EXPERIENCE
+Engineer | Acme | 2022 - Present
+- Shipped APIs
+
+PROJECTS
+Resume Parser
+- Structured section extraction
+
+EDUCATION
+B.Tech CSE | Uni | 2018-2022
+"""
+    sections = extract_sections(text)["sections"]
+    skills = "\n".join(sections["skills"]).lower()
+    assert "resume parser" not in skills
+    assert "shipped apis" not in skills
+    assert "acme" not in skills
+    assert any("python" in s.lower() for s in sections["skills"])
+    assert "projects" in sections
+    assert "Resume Parser" in sections["projects"][0]
+    assert "experience" in sections
+    assert "Acme" in sections["experience"][0]
+
+
+def test_jd_sections_requirements_vs_responsibilities():
+    text = """
+Job Title: Backend Engineer
+Company: Acme
+
+RESPONSIBILITIES
+- Build APIs
+- Own services
+
+REQUIREMENTS
+- Python
+- SQL
+
+PREFERRED QUALIFICATIONS
+- Kubernetes
+"""
+    result = extract_sections(text, "jd-extraction-v1")
+    sections = result["sections"]
+    assert "responsibilities" in sections
+    assert "requirements" in sections
+    assert "preferred_qualifications" in sections
+    req = "\n".join(sections["requirements"]).lower()
+    assert "python" in req
+    assert "build apis" not in req

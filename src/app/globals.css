@@ -266,6 +266,75 @@ td { font-size: var(--text-sm); }
 .settings-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
 .toast { position: fixed; z-index: 100; right: 20px; bottom: 20px; max-width: 360px; padding: 14px 18px; border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border)); border-radius: 14px; background: var(--success); box-shadow: var(--shadow-md); font-weight: 700; }
 
+/* Modal + in-app PDF preview (resumes library) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, #0b1a24 58%, transparent);
+  backdrop-filter: blur(4px);
+}
+.modal-panel {
+  width: min(960px, 100%);
+  max-height: min(92vh, 920px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface, #fff);
+  box-shadow: var(--shadow-lg);
+}
+.modal-panel-wide { width: min(1100px, 100%); }
+.modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.modal-header h2 { margin: 0; font-size: 1.1rem; }
+.pdf-frame {
+  width: 100%;
+  min-height: min(72vh, 760px);
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f4f6f8;
+}
+
+/* Resume-Matcher-style paper preview in editor */
+.resume-paper {
+  position: sticky;
+  top: 12px;
+  padding: 28px 26px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: var(--shadow-md);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  max-height: min(82vh, 900px);
+  overflow: auto;
+}
+.resume-paper h3 {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--primary-dark, #123);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+.resume-paper-section { margin-bottom: 16px; }
+.resume-paper-section p { margin: 0 0 6px; white-space: pre-wrap; }
+.resume-paper-section ul { margin: 0; padding-left: 18px; }
+.resume-paper-section li { margin-bottom: 4px; }
+.keyword-hit {
+  background: #fff3a6;
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+}
+
 @media (max-width: 1024px) {
   .nav-links > a:not(.button) { display: none; }
   .journey { grid-template-columns: 1fr; gap: 10px; }.journey article { min-height: auto; margin: 0; }.journey article:nth-child(even) { transform: none; }.journey article::after { display: none !important; }

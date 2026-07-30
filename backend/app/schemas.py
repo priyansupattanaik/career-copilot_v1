@@ -287,3 +287,11 @@ class ManualResumeVersionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     structured_content: dict[str, Any]
     candidate_confirmed: Literal[True]
+    # Default: patch the existing resume version (same resume + same version id).
+    # "new_version" keeps the prior content as history and is opt-in only.
+    apply_mode: Literal["in_place", "new_version"] = "in_place"
+
+
+class ApplyImprovementBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    apply_mode: Literal["in_place", "new_version"] = "in_place"

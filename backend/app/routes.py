@@ -32,6 +32,7 @@ from app.avatars import (
     signed_avatar_url,
     validate_avatar_upload,
 )
+from app.agents.ats import generate_ats_improvement_brief
 from app.agents.interview import generate_interview_questions
 from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
 from app.repository import (
@@ -1337,7 +1338,7 @@ def preview_resume(
         client.table("resume_versions")
         .select(
             "id,version_number,original_filename,mime_type,extraction_status,created_at,"
-            "plain_text,structured_content,storage_path,size_bytes"
+            "plain_text,structured_content,storage_path,size_bytes,change_metadata"
         )
         .eq("resume_id", str(resume_id))
         .eq("user_id", str(user.id))
@@ -1360,6 +1361,8 @@ def preview_resume(
             download_url = response.get("signedURL") or response.get("signed_url")
         except Exception:
             download_url = None
+    change_meta = version.get("change_metadata") if isinstance(version.get("change_metadata"), dict) else {}
+    content_edited = bool(change_meta.get("in_place_edit") or change_meta.get("content_edited_at"))
     return {
         "resume": {
             "id": resume.get("id"),
@@ -1377,9 +1380,13 @@ def preview_resume(
             "size_bytes": version.get("size_bytes"),
             "plain_text": version.get("plain_text") or "",
             "structured_content": version.get("structured_content") or {},
+            "change_metadata": change_meta,
+            "content_edited": content_edited,
         },
         "download_url": download_url,
         "expires_in": settings.export_signed_url_seconds if download_url else 0,
+        # Prefer regenerated PDF when the existing resume was patched after upload.
+        "prefer_rendered_pdf": content_edited,
     }
 
 
@@ -1767,7 +1774,7 @@ def delete_ats(
 
 
 @router.post("/ats-analyses", status_code=201)
-def create_ats(
+async def create_ats(
     payload: AtsAnalysisCreate,
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
@@ -1818,6 +1825,7 @@ def create_ats(
         .data[0]
     )
     try:
+        # Persist full coverage rows for scoring audit; UI shows missing keywords only.
         evidence_rows = [
             {
                 "user_id": str(user.id),
@@ -1825,21 +1833,30 @@ def create_ats(
                 "category": "keyword_coverage",
                 "requirement_text": item.requirement,
                 "requirement_type": "keyword",
-                "resume_evidence_text": item.resume_evidence,
+                "resume_evidence_text": item.resume_evidence if item.matched else None,
                 "resume_section": item.resume_section,
                 "resume_source_reference": {"resume_version_id": str(payload.resume_version_id)},
                 "job_description_source_reference": {"job_description_id": str(payload.job_description_id)},
                 "match_status": "strong_match" if item.matched else "not_found",
                 "score_contribution": item.score_contribution,
                 "rule_id": "exact_normalized_keyword",
-                "explanation": item.explanation
-                if item.matched
-                else "",
+                "explanation": "",
             }
             for item in score.evidence
         ]
         if evidence_rows:
             client.table("ats_evidence").insert(evidence_rows).execute()
+
+        brief = await generate_ats_improvement_brief(
+            settings,
+            overall_score=score.overall_score,
+            missing_terms=score.missing_terms,
+            matched_count=len(score.matched_terms),
+            total_terms=len(score.evidence),
+            role_title=job.get("role_title") or job.get("title"),
+            company=job.get("company"),
+        )
+
         completed = (
             client.table("ats_analyses")
             .update(
@@ -1850,8 +1867,14 @@ def create_ats(
                     "summary": {
                         "method": "Deterministic normalized keyword coverage",
                         "matched": len(score.matched_terms),
+                        "missing": len(score.missing_terms),
                         "total": len(score.evidence),
-                        "disclaimer": "Coverage evidence is not a hiring prediction.",
+                        "missing_terms": score.missing_terms,
+                        "overall_inference": brief.get("overall_inference"),
+                        "focus_areas": brief.get("focus_areas") or [],
+                        "inference_provider": brief.get("provider"),
+                        "inference_model": brief.get("model"),
+                        "disclaimer": "Keyword coverage is not a hiring prediction. Do not add false experience.",
                     },
                     "completed_at": utc_now(),
                 }
@@ -1962,6 +1985,55 @@ def get_interview(
         or []
     )
     return {"session": session, "questions": questions}
+
+
+@router.delete("/interviews/{session_id}", status_code=204)
+def delete_interview(
+    session_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Permanently delete a mock interview session for the signed-in candidate.
+    Cascades to interview_questions, interview_responses, and interview_reports in DB.
+    Also removes any interview media files referenced by responses.
+    """
+    client = client_for(settings, user)
+    owned_row(client, "interview_sessions", session_id, user)
+
+    # Best-effort media cleanup before row delete.
+    media_paths: list[str] = []
+    try:
+        responses = (
+            client.table("interview_responses")
+            .select("audio_path,video_path")
+            .eq("session_id", str(session_id))
+            .eq("user_id", str(user.id))
+            .execute()
+            .data
+            or []
+        )
+        for row in responses:
+            for key in ("audio_path", "video_path"):
+                path = row.get(key)
+                if path and str(path).strip():
+                    media_paths.append(str(path).strip())
+        if media_paths:
+            client.storage.from_(settings.interview_bucket).remove(media_paths)
+    except Exception:
+        pass
+
+    client.table("interview_sessions").delete().eq("id", str(session_id)).eq(
+        "user_id", str(user.id)
+    ).execute()
+    write_activity(
+        client,
+        user,
+        "interview_deleted",
+        "Mock interview session deleted",
+        "interview_session",
+        str(session_id),
+    )
 
 
 @router.post("/interviews/{session_id}/start")

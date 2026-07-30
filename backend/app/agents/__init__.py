@@ -7,6 +7,7 @@ Layout:
     prompts/          System prompts (versioned text files)
     profile_fill/     Resume → profile (NVIDIA when configured)
     interview/        Mock interview questions (Groq when configured)
+    ats/              ATS missing-keyword improvement brief
 
 Public entry points:
   from app.agents.llm import NvidiaClient, GroqClient

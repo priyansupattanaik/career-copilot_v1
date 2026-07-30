@@ -199,10 +199,116 @@ def _plain_text(structured: dict[str, Any]) -> str:
     return "\n".join(values).strip()
 
 
-def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str) -> dict[str, Any]:
+def _merge_structured_preserve_identity(
+    source: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge edits into the existing resume structure without dropping unknown sections."""
+    if not isinstance(incoming.get("sections"), dict):
+        raise ApiError(422, "invalid_resume_structure", "The resume must contain structured sections.")
+    source_sections = source.get("sections") if isinstance(source.get("sections"), dict) else {}
+    incoming_sections = incoming.get("sections") or {}
+    merged_sections: dict[str, Any] = {}
+    # Keep original section order where possible, then any new keys the editor added.
+    for key in list(source_sections.keys()) + [
+        k for k in incoming_sections.keys() if k not in source_sections
+    ]:
+        if key in incoming_sections:
+            value = incoming_sections[key]
+            lines = [str(item).strip() for item in value] if isinstance(value, list) else [str(value).strip()]
+            lines = [line for line in lines if line]
+            # Explicit empty list = user cleared this section on the existing resume.
+            if lines:
+                merged_sections[key] = lines
+        elif key in source_sections:
+            # Section not present in the payload at all → preserve original identity.
+            merged_sections[key] = source_sections[key]
+    unclassified = incoming.get("unclassified_blocks")
+    if not isinstance(unclassified, list):
+        unclassified = source.get("unclassified_blocks") or []
+    unclassified = [str(item).strip() for item in unclassified if str(item).strip()]
+    return {
+        "schema_version": incoming.get("schema_version")
+        or source.get("schema_version")
+        or "resume-extraction-v1",
+        "sections": merged_sections,
+        "unclassified_blocks": unclassified,
+        "warnings": source.get("warnings") or [],
+    }
+
+
+def update_existing_resume_content(
+    client,
+    user: CurrentUser,
+    source_version_id: str,
+    structured_content: dict[str, Any],
+    *,
+    change_metadata: dict[str, Any] | None = None,
+    improvement_run_id: str | None = None,
+) -> dict[str, Any]:
+    """Patch the same resume version in place (same resume_id + same version id).
+
+    Does not create a new resume or a new version row. Keeps original_filename and
+    storage_path so the candidate's uploaded document identity is preserved; ATS and
+    exports read plain_text / structured_content.
+    """
+    source = confirmed_version(client, source_version_id, user)
+    merged = _merge_structured_preserve_identity(source.get("structured_content") or {}, structured_content)
+    if merged == (source.get("structured_content") or {}):
+        raise ApiError(409, "resume_unchanged", "Make a change before saving the existing resume.")
+    prior_meta = source.get("change_metadata") if isinstance(source.get("change_metadata"), dict) else {}
+    meta = {
+        **prior_meta,
+        **(change_metadata or {}),
+        "in_place_edit": True,
+        "candidate_confirmed": True,
+        "content_edited_at": datetime.now(UTC).isoformat(),
+        "edited_from_version_id": source["id"],
+        "resume_id": source["resume_id"],
+    }
+    values: dict[str, Any] = {
+        "structured_content": merged,
+        "plain_text": _plain_text(merged),
+        "extraction_status": "confirmed",
+        "candidate_confirmed_at": datetime.now(UTC).isoformat(),
+        "change_metadata": meta,
+        "source_type": "edited",
+    }
+    if improvement_run_id:
+        values["improvement_run_id"] = improvement_run_id
+    rows = (
+        client.table("resume_versions")
+        .update(values)
+        .eq("id", source["id"])
+        .eq("user_id", str(user.id))
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        raise ApiError(500, "resume_version_update_failed", "The existing resume could not be updated.")
+    record = rows[0]
+    write_activity(
+        client,
+        user,
+        "resume_version_updated",
+        "Existing resume updated in place",
+        "resume_version",
+        record["id"],
+    )
+    return record
+
+
+def apply_suggestions(
+    client,
+    settings: Settings,
+    user: CurrentUser,
+    run_id: str,
+    *,
+    apply_mode: str = "in_place",
+) -> dict[str, Any]:
     run = get_run(client, run_id, user)
     if run.get("status") != "completed":
-        raise ApiError(409, "run_not_completed", "Only a completed improvement run can create a version.")
+        raise ApiError(409, "run_not_completed", "Only a completed improvement run can be applied.")
     source = confirmed_version(client, run["resume_version_id"], user)
     suggestions = [
         item
@@ -213,7 +319,7 @@ def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str
         raise ApiError(
             409,
             "no_approved_suggestions",
-            "Accept or edit at least one suggestion before creating a version.",
+            "Accept or edit at least one suggestion before applying changes.",
         )
     if len({item["source_block_id"] for item in suggestions}) != len(suggestions):
         raise ApiError(
@@ -234,6 +340,29 @@ def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str
             else suggestion["suggested_text"]
         )
         _replace_block(updated, block, replacement)
+
+    applied_meta = {
+        "applied_suggestion_ids": [item["id"] for item in suggestions],
+        "candidate_confirmed_edit_ids": [
+            item["id"] for item in suggestions if item["decision"] == "edited"
+        ],
+        "improvement_run_id": run_id,
+    }
+
+    if apply_mode != "new_version":
+        record = update_existing_resume_content(
+            client,
+            user,
+            source["id"],
+            updated,
+            change_metadata=applied_meta,
+            improvement_run_id=run_id,
+        )
+        return {
+            "resume_version": record,
+            "applied_suggestion_ids": [item["id"] for item in suggestions],
+            "apply_mode": "in_place",
+        }
 
     count = (
         client.table("resume_versions")
@@ -260,7 +389,7 @@ def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str
                     "user_id": str(user.id),
                     "version_number": version_number,
                     "source_type": "edited",
-                    "original_filename": f"resume-v{version_number}.docx",
+                    "original_filename": source.get("original_filename") or f"resume-v{version_number}.docx",
                     "storage_path": path,
                     "mime_type": DOCX_MIME,
                     "size_bytes": len(content),
@@ -271,12 +400,7 @@ def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str
                     "candidate_confirmed_at": datetime.now(UTC).isoformat(),
                     "created_from_version_id": source["id"],
                     "improvement_run_id": run_id,
-                    "change_metadata": {
-                        "applied_suggestion_ids": [item["id"] for item in suggestions],
-                        "candidate_confirmed_edit_ids": [
-                            item["id"] for item in suggestions if item["decision"] == "edited"
-                        ],
-                    },
+                    "change_metadata": {**applied_meta, "in_place_edit": False},
                 }
             )
             .execute()
@@ -298,7 +422,11 @@ def apply_suggestions(client, settings: Settings, user: CurrentUser, run_id: str
         "resume_version",
         version_id,
     )
-    return {"resume_version": record, "applied_suggestion_ids": [item["id"] for item in suggestions]}
+    return {
+        "resume_version": record,
+        "applied_suggestion_ids": [item["id"] for item in suggestions],
+        "apply_mode": "new_version",
+    }
 
 
 def compare_versions(client, user: CurrentUser, left_id: str, right_id: str) -> dict[str, Any]:
@@ -335,12 +463,28 @@ def compare_versions(client, user: CurrentUser, left_id: str, right_id: str) -> 
 
 
 def create_manual_version(
-    client, settings: Settings, user: CurrentUser, source_version_id: str, structured_content: dict[str, Any]
+    client,
+    settings: Settings,
+    user: CurrentUser,
+    source_version_id: str,
+    structured_content: dict[str, Any],
+    *,
+    apply_mode: str = "in_place",
 ) -> dict[str, Any]:
+    """Save candidate edits onto the existing resume (default) or optional new version."""
     source = confirmed_version(client, source_version_id, user)
-    if not isinstance(structured_content.get("sections"), dict):
-        raise ApiError(422, "invalid_resume_structure", "The resume must contain structured sections.")
-    if structured_content == source["structured_content"]:
+    merged = _merge_structured_preserve_identity(source.get("structured_content") or {}, structured_content)
+
+    if apply_mode != "new_version":
+        return update_existing_resume_content(
+            client,
+            user,
+            source["id"],
+            merged,
+            change_metadata={"manual_edit": True},
+        )
+
+    if merged == (source.get("structured_content") or {}):
         raise ApiError(409, "resume_unchanged", "Make a change before creating a new version.")
     count = (
         client.table("resume_versions")
@@ -352,7 +496,7 @@ def create_manual_version(
     )
     version_id = str(uuid.uuid4())
     version_number = count + 1
-    content = render_docx(structured_content)
+    content = render_docx(merged)
     path = f"{user.id}/resumes/{source['resume_id']}/versions/{version_id}/{uuid.uuid4()}.docx"
     try:
         client.storage.from_(settings.document_bucket).upload(
@@ -367,17 +511,21 @@ def create_manual_version(
                     "user_id": str(user.id),
                     "version_number": version_number,
                     "source_type": "edited",
-                    "original_filename": f"resume-v{version_number}.docx",
+                    "original_filename": source.get("original_filename") or f"resume-v{version_number}.docx",
                     "storage_path": path,
                     "mime_type": DOCX_MIME,
                     "size_bytes": len(content),
                     "sha256": sha256_bytes(content),
-                    "plain_text": _plain_text(structured_content),
-                    "structured_content": structured_content,
+                    "plain_text": _plain_text(merged),
+                    "structured_content": merged,
                     "extraction_status": "confirmed",
                     "candidate_confirmed_at": datetime.now(UTC).isoformat(),
                     "created_from_version_id": source["id"],
-                    "change_metadata": {"manual_edit": True, "candidate_confirmed": True},
+                    "change_metadata": {
+                        "manual_edit": True,
+                        "candidate_confirmed": True,
+                        "in_place_edit": False,
+                    },
                 }
             )
             .execute()

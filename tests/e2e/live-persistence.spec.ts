@@ -100,8 +100,8 @@ test.describe("live Supabase persistence", () => {
     await expect(page).toHaveURL(/\/resume-analysis\/report\/[0-9a-f-]+$/, { timeout: 60000 });
     await expect(page.getByText("JD keyword coverage")).toBeVisible();
     await expect(page.getByRole("heading", { name: /\/100$/ })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Matched evidence" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Missing terms" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Missing keywords" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overall improvement inference" })).toBeVisible();
 
     await page.goto("/resume-analysis");
     await expect(page.getByRole("button", { name: "ATS analyses" })).toBeVisible();
