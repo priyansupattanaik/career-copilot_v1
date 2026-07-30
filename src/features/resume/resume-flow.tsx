@@ -35,6 +35,7 @@ type JobDescription = {
   structured_content?: StructuredContent;
   raw_text?: string;
   created_at?: string;
+  confidence?: string | null;
 };
 type Analysis = {
   id: string;
@@ -70,7 +71,40 @@ type AtsEvidence = {
   explanation?: string | null;
 };
 
-type HubTab = "ats" | "upload";
+type HubTab = "ats" | "resumes" | "upload";
+
+type ResumeListItem = {
+  id: string;
+  title: string;
+  is_active: boolean;
+  created_at: string;
+  latest_version?: {
+    id: string;
+    version_number: number;
+    original_filename?: string;
+    mime_type?: string;
+    extraction_status?: string;
+    created_at?: string;
+    size_bytes?: number;
+  } | null;
+};
+
+type ResumePreview = {
+  resume: { id: string; title: string; is_active: boolean; created_at: string };
+  version: {
+    id: string;
+    version_number: number;
+    original_filename?: string;
+    mime_type?: string;
+    extraction_status?: string;
+    created_at?: string;
+    size_bytes?: number;
+    plain_text?: string;
+    structured_content?: StructuredContent;
+  };
+  download_url?: string | null;
+  expires_in?: number;
+};
 
 function formatDate(value?: string | null) {
   if (!value) return "—";
@@ -102,11 +136,20 @@ function jdLabel(analysis: Analysis) {
 
 export function AnalysisHistory() {
   const searchParams = useSearchParams();
-  const initialTab = searchParams.get("tab") === "upload" ? "upload" : "ats";
+  const tabParam = searchParams.get("tab");
+  const initialTab: HubTab =
+    tabParam === "upload" ? "upload" : tabParam === "resumes" ? "resumes" : "ats";
   const [tab, setTab] = useState<HubTab>(initialTab);
 
   useEffect(() => {
-    setTab(searchParams.get("tab") === "upload" ? "upload" : "ats");
+    const next =
+      searchParams.get("tab") === "upload"
+        ? "upload"
+        : searchParams.get("tab") === "resumes"
+          ? "resumes"
+          : "ats";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: derives tab from URL params
+    setTab(next);
   }, [searchParams]);
 
   return (
@@ -114,7 +157,7 @@ export function AnalysisHistory() {
       <PageHeader
         eyebrow="Resume analysis"
         title="ATS analysis workspace"
-        description="Review past ATS scores or upload a resume and job description for a new analysis."
+        description="Manage resumes, review past ATS scores, or start a new analysis."
       />
       <nav className="settings-nav" aria-label="Resume analysis sections">
         <button
@@ -126,28 +169,42 @@ export function AnalysisHistory() {
         </button>
         <button
           type="button"
+          className={`button ${tab === "resumes" ? "button-primary" : "button-secondary"}`}
+          onClick={() => setTab("resumes")}
+        >
+          Resumes
+        </button>
+        <button
+          type="button"
           className={`button ${tab === "upload" ? "button-primary" : "button-secondary"}`}
           onClick={() => setTab("upload")}
         >
           New upload
         </button>
       </nav>
-      {tab === "ats" ? <AtsHistoryList /> : <NewAnalysis embedded />}
+      {tab === "ats" ? <AtsHistoryList /> : tab === "resumes" ? <ResumeLibrary /> : <NewAnalysis embedded />}
     </>
   );
 }
 
-function AtsHistoryList() {
-  const [analyses, setAnalyses] = useState<Analysis[]>([]);
+function ResumeLibrary() {
+  const [resumes, setResumes] = useState<ResumeListItem[]>([]);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ResumePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  async function loadResumes() {
+    const rows = await apiRequest<ResumeListItem[]>("/resumes");
+    setResumes(rows || []);
+  }
 
   useEffect(() => {
     let active = true;
-    apiRequest<Analysis[]>("/ats-analyses")
-      .then((rows) => {
-        if (active) setAnalyses(rows || []);
-      })
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- setState is inside promise callbacks, not synchronously
+    loadResumes()
       .catch((reason: Error) => {
         if (active) setError(reason.message);
       })
@@ -158,6 +215,189 @@ function AtsHistoryList() {
       active = false;
     };
   }, []);
+
+  async function openPreview(resumeId: string) {
+    setPreviewLoading(true);
+    setError("");
+    try {
+      const data = await apiRequest<ResumePreview>(`/resumes/${resumeId}/preview`);
+      setPreview(data);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  async function deleteResume(resumeId: string, title: string) {
+    if (!window.confirm(`Delete resume “${title}”? This removes it from your library.`)) return;
+    setDeletingId(resumeId);
+    setError("");
+    setMessage("");
+    try {
+      await apiRequest(`/resumes/${resumeId}`, { method: "DELETE" });
+      setResumes((current) => current.filter((row) => row.id !== resumeId));
+      if (preview?.resume.id === resumeId) setPreview(null);
+      setMessage("Resume deleted.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <p>Loading resumes…</p>
+      </Card>
+    );
+  }
+
+  const sections = (preview?.version.structured_content?.sections || {}) as Record<string, string[]>;
+
+  return (
+    <div className="stack">
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+      {message && (
+        <p role="status" style={{ margin: 0 }}>
+          {message}
+        </p>
+      )}
+      {!resumes.length ? (
+        <Card className="empty-state">
+          <h2>No resumes yet</h2>
+          <p>Upload a resume from New upload to see it here.</p>
+          <Link className="button button-primary" href="/resume-analysis?tab=upload">
+            New upload
+          </Link>
+        </Card>
+      ) : (
+        resumes.map((resume) => (
+          <Card className="stack" key={resume.id}>
+            <div className="row">
+              <div>
+                <p className="eyebrow">{resume.is_active ? "Active resume" : "Stored resume"}</p>
+                <h2 style={{ marginBottom: 6 }}>{resume.title}</h2>
+                <p style={{ margin: 0 }}>
+                  {resume.latest_version?.original_filename || "File stored"}
+                  {resume.latest_version?.version_number != null
+                    ? ` · v${resume.latest_version.version_number}`
+                    : ""}
+                  {" · "}
+                  {formatDate(resume.created_at)}
+                </p>
+                {resume.latest_version?.extraction_status && (
+                  <p className="muted" style={{ margin: "6px 0 0" }}>
+                    Status: {resume.latest_version.extraction_status}
+                  </p>
+                )}
+              </div>
+              <Badge tone={resume.is_active ? "success" : "info"}>{resume.is_active ? "Active" : "Stored"}</Badge>
+            </div>
+            <div className="cluster">
+              <Button variant="secondary" disabled={previewLoading} onClick={() => openPreview(resume.id)}>
+                {previewLoading ? "Loading…" : "Preview"}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={deletingId === resume.id}
+                onClick={() => deleteResume(resume.id, resume.title)}
+              >
+                {deletingId === resume.id ? "Deleting…" : "Delete"}
+              </Button>
+            </div>
+          </Card>
+        ))
+      )}
+
+      {preview && (
+        <Card className="stack">
+          <div className="row">
+            <div>
+              <p className="eyebrow">Resume preview</p>
+              <h2 style={{ margin: 0 }}>{preview.resume.title}</h2>
+              <p style={{ margin: "6px 0 0" }}>
+                {preview.version.original_filename || "Stored file"}
+                {preview.version.version_number != null ? ` · v${preview.version.version_number}` : ""}
+              </p>
+            </div>
+            <div className="cluster">
+              {preview.download_url && (
+                <a className="button button-secondary" href={preview.download_url} target="_blank" rel="noreferrer">
+                  Open original file
+                </a>
+              )}
+              <Button variant="secondary" onClick={() => setPreview(null)}>
+                Close preview
+              </Button>
+            </div>
+          </div>
+          {Object.keys(sections).length > 0 ? (
+            Object.entries(sections).map(([section, lines]) => (
+              <div key={section}>
+                <strong style={{ textTransform: "capitalize" }}>{section.replaceAll("_", " ")}</strong>
+                <SectionEntries lines={lines} />
+              </div>
+            ))
+          ) : (
+            <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+              {(preview.version.plain_text || "No extracted text available for preview.").slice(0, 4000)}
+              {(preview.version.plain_text || "").length > 4000 ? "…" : ""}
+            </p>
+          )}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function AtsHistoryList() {
+  const [analyses, setAnalyses] = useState<Analysis[]>([]);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function loadAnalyses() {
+    const rows = await apiRequest<Analysis[]>("/ats-analyses");
+    setAnalyses(rows || []);
+  }
+
+  useEffect(() => {
+    let active = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- setState is inside promise callbacks, not synchronously
+    loadAnalyses()
+      .catch((reason: Error) => {
+        if (active) setError(reason.message);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function deleteAnalysis(analysisId: string) {
+    if (!window.confirm("Delete this ATS analysis? This cannot be undone.")) return;
+    setDeletingId(analysisId);
+    setError("");
+    setMessage("");
+    try {
+      await apiRequest(`/ats-analyses/${analysisId}`, { method: "DELETE" });
+      setAnalyses((current) => current.filter((row) => row.id !== analysisId));
+      setMessage("ATS analysis deleted.");
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   if (loading) {
     return (
@@ -172,6 +412,11 @@ function AtsHistoryList() {
       {error && (
         <p role="alert" className="field-error">
           {error}
+        </p>
+      )}
+      {message && (
+        <p role="status" style={{ margin: 0 }}>
+          {message}
         </p>
       )}
       {!analyses.length ? (
@@ -207,13 +452,20 @@ function AtsHistoryList() {
                 <p style={{ margin: "6px 0 0" }}>{jdLabel(analysis)}</p>
               </div>
             </div>
-            {analysis.status === "completed" && (
-              <div className="cluster">
+            <div className="cluster">
+              {analysis.status === "completed" && (
                 <Link className="button button-primary" href={`/resume-analysis/report/${analysis.id}`}>
                   Open report
                 </Link>
-              </div>
-            )}
+              )}
+              <Button
+                variant="danger"
+                disabled={deletingId === analysis.id}
+                onClick={() => deleteAnalysis(analysis.id)}
+              >
+                {deletingId === analysis.id ? "Deleting…" : "Delete"}
+              </Button>
+            </div>
           </Card>
         ))
       )}
@@ -221,14 +473,71 @@ function AtsHistoryList() {
   );
 }
 
+type UploadStep = "upload" | "review";
+
+function SectionEntries({ lines }: { lines: string[] }) {
+  if (!lines?.length) {
+    return <p style={{ margin: "6px 0 0" }}>No content extracted for this section.</p>;
+  }
+  return (
+    <div className="stack" style={{ gap: 10, marginTop: 6 }}>
+      {lines.map((entry, index) => (
+        <div
+          key={`${index}-${entry.slice(0, 24)}`}
+          className="suggestion"
+          style={{ whiteSpace: "pre-wrap", margin: 0 }}
+        >
+          {entry}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExtractionPanel({
+  title,
+  status,
+  sections,
+  fallbackText,
+}: {
+  title: string;
+  status: string;
+  sections: Record<string, string[]>;
+  fallbackText?: string;
+}) {
+  const entries = Object.entries(sections || {});
+  return (
+    <Card className="stack">
+      <div className="row">
+        <h2 style={{ margin: 0 }}>{title}</h2>
+        <Badge tone={status === "confirmed" ? "success" : "warning"}>{status}</Badge>
+      </div>
+      {entries.length ? (
+        entries.map(([section, lines]) => (
+          <div key={section}>
+            <strong style={{ textTransform: "capitalize" }}>{section.replaceAll("_", " ")}</strong>
+            <SectionEntries lines={lines} />
+          </div>
+        ))
+      ) : fallbackText ? (
+        <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+          {fallbackText.slice(0, 2500)}
+          {fallbackText.length > 2500 ? "…" : ""}
+        </p>
+      ) : (
+        <p style={{ margin: 0 }}>No extracted content available yet.</p>
+      )}
+    </Card>
+  );
+}
+
 export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
   const router = useRouter();
-  const [title, setTitle] = useState("");
+  const [step, setStep] = useState<UploadStep>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [jdMode, setJdMode] = useState<"text" | "file">("text");
   const [jd, setJd] = useState("");
   const [jdFile, setJdFile] = useState<File | null>(null);
-  const [jdTitle, setJdTitle] = useState("Job description");
   const [resume, setResume] = useState<Resume | null>(null);
   const [resumeVersion, setResumeVersion] = useState<ResumeVersion | null>(null);
   const [job, setJob] = useState<JobDescription | null>(null);
@@ -237,69 +546,72 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  async function uploadResume() {
+  const canProceed =
+    Boolean(file && isValidCareerFile(file)) &&
+    (jdMode === "text" ? jd.trim().length >= 20 : Boolean(jdFile && isValidCareerFile(jdFile)));
+
+  /** On Proceed: store resume + JD in DB, then open extraction review. */
+  async function proceed() {
     if (!file || !isValidCareerFile(file)) {
       setError("Choose a PDF or DOCX resume no larger than 10 MB.");
       return;
     }
-    const body = new FormData();
-    body.set("title", title || file.name);
-    body.set("file", file);
-    setBusy(true);
-    try {
-      const result = await apiRequest<{ resume: Resume; version: ResumeVersion }>("/resumes", {
-        method: "POST",
-        body,
-      });
-      setResume(result.resume);
-      setResumeVersion(result.version);
-      setReviewed(false);
-      setMessage(`Resume stored: ${result.resume.title}.`);
-      setError("");
-    } catch (reason) {
-      setError((reason as Error).message);
-    } finally {
-      setBusy(false);
+    if (jdMode === "text" && jd.trim().length < 20) {
+      setError("Paste a job description of at least 20 characters.");
+      return;
     }
-  }
+    if (jdMode === "file" && (!jdFile || !isValidCareerFile(jdFile))) {
+      setError("Choose a PDF or DOCX job description no larger than 10 MB.");
+      return;
+    }
 
-  async function storeJd() {
     setBusy(true);
     setError("");
+    setMessage("Saving resume and job description…");
     try {
-      let result: JobDescription;
+      const resumeBody = new FormData();
+      resumeBody.set("file", file);
+      const resumeResult = await apiRequest<{ resume: Resume; version: ResumeVersion }>("/resumes", {
+        method: "POST",
+        body: resumeBody,
+      });
+
+      let jobResult: JobDescription;
       if (jdMode === "text") {
-        if (jd.trim().length < 20) {
-          throw new Error("Paste a job description of at least 20 characters.");
-        }
-        result = await apiRequest<JobDescription>("/job-descriptions", {
+        jobResult = await apiRequest<JobDescription>("/job-descriptions", {
           method: "POST",
-          body: JSON.stringify({ title: jdTitle || "Job description", raw_text: jd }),
+          body: JSON.stringify({ raw_text: jd }),
         });
       } else {
-        if (!jdFile || !isValidCareerFile(jdFile)) {
-          throw new Error("Choose a PDF or DOCX job description no larger than 10 MB.");
-        }
-        const body = new FormData();
-        body.set("title", jdTitle || jdFile.name);
-        body.set("file", jdFile);
-        result = await apiRequest<JobDescription>("/job-descriptions/upload", { method: "POST", body });
+        const jdBody = new FormData();
+        jdBody.set("file", jdFile as File);
+        jobResult = await apiRequest<JobDescription>("/job-descriptions/upload", {
+          method: "POST",
+          body: jdBody,
+        });
       }
-      setJob(result);
+
+      setResume(resumeResult.resume);
+      setResumeVersion(resumeResult.version);
+      setJob(jobResult);
       setReviewed(false);
-      setMessage("Job description stored.");
+      setMessage(
+        `Saved “${resumeResult.resume.title}” and JD${jobResult.role_title ? ` (${jobResult.role_title})` : ""}. Review extractions below.`,
+      );
+      setStep("review");
     } catch (reason) {
       setError((reason as Error).message);
+      setMessage("");
     } finally {
       setBusy(false);
     }
   }
 
-  async function calculate() {
+  async function runAnalysis() {
     if (!resume || !resumeVersion || !job || !reviewed) return;
     setBusy(true);
     setError("");
-    setMessage("Confirming evidence and calculating ATS score…");
+    setMessage("Confirming extractions and calculating ATS score…");
     try {
       let confirmedVersion = resumeVersion;
       if (confirmedVersion.extraction_status !== "confirmed") {
@@ -342,9 +654,9 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
     <>
       {!embedded && (
         <PageHeader
-          eyebrow="New upload"
-          title="Upload resume and job description"
-          description="Resume must be PDF or DOCX. Job description can be pasted text, PDF, or DOCX."
+          eyebrow="New analysis"
+          title="Resume and JD analysis"
+          description="Select a resume and job description, then Proceed to save them and review extractions before analysis."
           action={
             <Link className="button button-secondary" href="/resume-analysis">
               ATS analyses
@@ -352,82 +664,11 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
           }
         />
       )}
-      <div className="grid-2">
-        <Card className="stack">
-          <h2 style={{ margin: 0 }}>Resume upload</h2>
-          <p style={{ margin: 0 }}>Accepted formats: PDF or DOCX (max 10 MB).</p>
-          <label className="field-label">
-            Library title
-            <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Optional title" />
-          </label>
-          <label className="field-label">
-            Resume file
-            <Input
-              type="file"
-              accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-              onChange={(event) => setFile(event.target.files?.[0] || null)}
-            />
-          </label>
-          <Button disabled={busy || !file} onClick={uploadResume}>
-            {busy ? "Working…" : "Upload resume"}
-          </Button>
-          {resumeVersion && (
-            <p role="status" style={{ margin: 0 }}>
-              Ready: {resume?.title || "Resume"} · {resumeVersion.extraction_status}
-            </p>
-          )}
-        </Card>
 
-        <Card className="stack">
-          <h2 style={{ margin: 0 }}>Job description</h2>
-          <p style={{ margin: 0 }}>Accepted formats: pasted text, PDF, or DOCX.</p>
-          <div className="cluster">
-            <button
-              type="button"
-              className={`button ${jdMode === "text" ? "button-primary" : "button-secondary"}`}
-              onClick={() => setJdMode("text")}
-            >
-              Paste text
-            </button>
-            <button
-              type="button"
-              className={`button ${jdMode === "file" ? "button-primary" : "button-secondary"}`}
-              onClick={() => setJdMode("file")}
-            >
-              Upload PDF/DOCX
-            </button>
-          </div>
-          <label className="field-label">
-            JD title
-            <Input value={jdTitle} onChange={(event) => setJdTitle(event.target.value)} />
-          </label>
-          {jdMode === "text" ? (
-            <label className="field-label">
-              Paste text
-              <Textarea value={jd} onChange={(event) => setJd(event.target.value)} placeholder="Paste the job description…" />
-            </label>
-          ) : (
-            <label className="field-label">
-              JD file
-              <Input
-                type="file"
-                accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                onChange={(event) => setJdFile(event.target.files?.[0] || null)}
-              />
-            </label>
-          )}
-          <Button
-            disabled={busy || (jdMode === "text" ? !jd.trim() : !jdFile)}
-            onClick={storeJd}
-          >
-            {busy ? "Working…" : "Store job description"}
-          </Button>
-          {job && (
-            <p role="status" style={{ margin: 0 }}>
-              Ready: {job.title} · {job.extraction_status}
-            </p>
-          )}
-        </Card>
+      <div className="cluster" style={{ marginBottom: 16 }}>
+        <Badge tone={step === "upload" ? "info" : "success"}>1. Select files</Badge>
+        <Badge tone={step === "review" ? "info" : "warning"}>2. Review extractions</Badge>
+        <Badge tone="warning">3. Analysis</Badge>
       </div>
 
       {error && (
@@ -443,70 +684,132 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
         </Card>
       )}
 
-      {(resumeVersion || job) && (
-        <Card className="stack ats-review">
+      {step === "upload" && (
+        <div className="stack">
+          <div className="grid-2">
+            <Card className="stack">
+              <h2 style={{ margin: 0 }}>1. Resume</h2>
+              <p style={{ margin: 0 }}>PDF or DOCX only (max 10 MB). Saved when you click Proceed.</p>
+              <label className="field-label">
+                Resume file
+                <Input
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={(event) => setFile(event.target.files?.[0] || null)}
+                />
+              </label>
+              {file && (
+                <p style={{ margin: 0 }} className="muted">
+                  Selected: {file.name}
+                </p>
+              )}
+            </Card>
+
+            <Card className="stack">
+              <h2 style={{ margin: 0 }}>2. Job description</h2>
+              <p style={{ margin: 0 }}>Paste text, or choose PDF/DOCX. Saved when you click Proceed.</p>
+              <div className="cluster">
+                <button
+                  type="button"
+                  className={`button ${jdMode === "text" ? "button-primary" : "button-secondary"}`}
+                  onClick={() => setJdMode("text")}
+                >
+                  Paste text
+                </button>
+                <button
+                  type="button"
+                  className={`button ${jdMode === "file" ? "button-primary" : "button-secondary"}`}
+                  onClick={() => setJdMode("file")}
+                >
+                  Upload PDF/DOCX
+                </button>
+              </div>
+              {jdMode === "text" ? (
+                <label className="field-label">
+                  Paste text
+                  <Textarea
+                    value={jd}
+                    onChange={(event) => setJd(event.target.value)}
+                    placeholder="Paste the job description…"
+                  />
+                </label>
+              ) : (
+                <label className="field-label">
+                  JD file
+                  <Input
+                    type="file"
+                    accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    onChange={(event) => setJdFile(event.target.files?.[0] || null)}
+                  />
+                </label>
+              )}
+              {jdMode === "file" && jdFile && (
+                <p style={{ margin: 0 }} className="muted">
+                  Selected: {jdFile.name}
+                </p>
+              )}
+            </Card>
+          </div>
+
+          <Card className="stack">
+            <p style={{ margin: 0 }}>
+              {canProceed
+                ? "Ready. Proceed will save the resume and job description, then show extractions."
+                : "Select a resume file and a job description (text or file) to continue."}
+            </p>
+            <Button disabled={!canProceed || busy} onClick={proceed}>
+              {busy ? "Saving…" : "Proceed"}
+            </Button>
+          </Card>
+        </div>
+      )}
+
+      {step === "review" && resumeVersion && job && (
+        <div className="stack">
           <div className="row">
             <div>
-              <p className="eyebrow">Required review</p>
-              <h2 style={{ margin: 0 }}>Confirm evidence for scoring</h2>
+              <p className="eyebrow">Review extractions</p>
+              <h2 style={{ margin: 0 }}>Confirm extracted resume and JD</h2>
             </div>
-            <Badge tone={resumeVersion && job ? "success" : "warning"}>
-              {resumeVersion && job ? "Both inputs ready" : "One input missing"}
-            </Badge>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setStep("upload");
+                setReviewed(false);
+              }}
+            >
+              Back to upload
+            </Button>
           </div>
+
           <div className="grid-2">
-            <div>
-              <h3>Resume · {resume?.title || "Not uploaded"}</h3>
-              <p className="muted">Status: {resumeVersion?.extraction_status || "missing"}</p>
-              {Object.keys(resumeSections).length ? (
-                <details>
-                  <summary>View extracted resume</summary>
-                  {Object.entries(resumeSections).map(([section, lines]) => (
-                    <div key={section}>
-                      <strong>{section.replaceAll("_", " ")}</strong>
-                      <p>{lines.join(" · ")}</p>
-                    </div>
-                  ))}
-                </details>
-              ) : (
-                <p>No extracted resume is available.</p>
-              )}
-            </div>
-            <div>
-              <h3>Job description · {job?.title || "Not stored"}</h3>
-              <p className="muted">Status: {job?.extraction_status || "missing"}</p>
-              {Object.keys(jobSections).length ? (
-                <details>
-                  <summary>View extracted job description</summary>
-                  {Object.entries(jobSections).map(([section, lines]) => (
-                    <div key={section}>
-                      <strong>{section.replaceAll("_", " ")}</strong>
-                      <p>{lines.join(" · ")}</p>
-                    </div>
-                  ))}
-                </details>
-              ) : job?.raw_text ? (
-                <details>
-                  <summary>View stored JD text</summary>
-                  <p>{job.raw_text.slice(0, 1200)}{job.raw_text.length > 1200 ? "…" : ""}</p>
-                </details>
-              ) : (
-                <p>No extracted job description is available.</p>
-              )}
-            </div>
+            <ExtractionPanel
+              title={`Resume · ${resume?.title || "Uploaded resume"}`}
+              status={resumeVersion.extraction_status}
+              sections={resumeSections}
+            />
+            <ExtractionPanel
+              title={`Job description · ${job.role_title || job.title}${job.company ? ` · ${job.company}` : ""}`}
+              status={job.extraction_status}
+              sections={jobSections}
+              fallbackText={job.raw_text}
+            />
           </div>
-          <label>
-            <input
-              type="checkbox"
-              checked={reviewed}
-              onChange={(event) => setReviewed(event.target.checked)}
-            />{" "}
-            I reviewed the extracted resume and job description and confirm they can be used for ATS keyword coverage.
-          </label>
-          <Button disabled={busy || !resumeVersion || !job || !reviewed} onClick={calculate}>
-            {busy ? "Calculating…" : "Confirm inputs and calculate ATS score"}
-          </Button>
-        </Card>
+
+          <Card className="stack">
+            <label>
+              <input
+                type="checkbox"
+                checked={reviewed}
+                onChange={(event) => setReviewed(event.target.checked)}
+              />{" "}
+              I reviewed the extracted resume and job description and confirm they can be used for ATS keyword coverage.
+            </label>
+            <Button disabled={busy || !reviewed} onClick={runAnalysis}>
+              {busy ? "Calculating…" : "Confirm inputs and calculate ATS score"}
+            </Button>
+          </Card>
+        </div>
       )}
     </>
   );
@@ -612,9 +915,21 @@ export function AtsReport() {
           <h2>Matched evidence</h2>
           {matched.length ? (
             matched.map((item) => (
-              <div className="suggestion" key={item.id}>
-                <strong>{item.requirement_text}</strong>
-                <span>{item.resume_evidence_text || "Matched in confirmed resume text"}</span>
+              <div className="suggestion stack" key={item.id} style={{ gap: 6 }}>
+                <strong style={{ textTransform: "none" }}>Keyword: {item.requirement_text}</strong>
+                {item.resume_evidence_text ? (
+                  <span>
+                    <strong>Evidence: </strong>
+                    {item.resume_evidence_text}
+                  </span>
+                ) : (
+                  <span className="muted">No single resume line isolated for this keyword.</span>
+                )}
+                <span>
+                  <strong>AI inference: </strong>
+                  {(item.explanation || "").replace(/^AI inference:\s*/i, "") ||
+                    "This keyword is present in confirmed resume text."}
+                </span>
               </div>
             ))
           ) : (
@@ -622,14 +937,15 @@ export function AtsReport() {
           )}
         </Card>
         <Card className="stack">
-          <h2>Missing terms</h2>
+          <h2>Missing keywords</h2>
           {missing.length ? (
-            missing.map((item) => (
-              <div className="suggestion" key={item.id}>
-                <strong>{item.requirement_text}</strong>
-                <span>{item.explanation}</span>
-              </div>
-            ))
+            <div className="cluster" style={{ gap: 8 }}>
+              {missing.map((item) => (
+                <Badge key={item.id} tone="warning">
+                  {item.requirement_text}
+                </Badge>
+              ))}
+            </div>
           ) : (
             <p>No scored JD terms are missing.</p>
           )}

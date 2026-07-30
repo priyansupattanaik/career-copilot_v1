@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -8,25 +8,47 @@ from fastapi import APIRouter, Body, Depends, File, Form, Header, UploadFile
 from app.ats import ALGORITHM_VERSION, score_resume
 from app.auth import CurrentUser, get_current_user
 from app.config import Settings, get_settings
-from app.documents import extract_sections, extract_text, safe_filename, sha256_bytes, validate_document
+from app.documents import (
+    extract_sections,
+    extract_skill_candidates,
+    extract_text,
+    infer_job_metadata,
+    infer_resume_title,
+    safe_filename,
+    sha256_bytes,
+    validate_document,
+)
 from app.errors import ApiError
+from app.account_deletion import (
+    CONFIRM_PHRASE,
+    collect_user_storage_paths,
+    confirmation_is_valid,
+    email_matches_account,
+    purge_user_storage,
+)
+from app.profile_from_resume import build_profile_draft, draft_counts
 from app.repository import (
     CANDIDATE_TABLES,
     client_for,
     owned_row,
     owned_rows,
     recalculate_completion,
+    list_recent_activity,
     write_activity,
 )
 from app.resume_improvement_routes import router as resume_improvement_router
 from app.schemas import (
+    AccountDeleteRequest,
     AtsAnalysisCreate,
     ExtractionPatch,
     InterviewCreate,
+    ProfileFromResumeApplyRequest,
+    ProfileFromResumePreviewRequest,
     InterviewResponseCreate,
     JobDescriptionTextCreate,
     LearningPathCreate,
     NotificationSettings,
+    JobDescriptionMetadataPatch,
     PreferencesUpdate,
     PrivacySettings,
     ProfilePatch,
@@ -44,14 +66,29 @@ def utc_now() -> str:
 
 @router.get("/health")
 def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
-    return {"status": "ok", "service": settings.app_name, "supabase_configured": settings.supabase_configured}
+    return {
+        "status": "ok",
+        "service": settings.app_name,
+        "supabase_configured": settings.supabase_configured,
+        "nvidia_configured": settings.nvidia_configured,
+    }
 
 
 @router.get("/health/supabase")
 def health_supabase(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     if not settings.supabase_configured:
         raise ApiError(503, "supabase_not_configured", "Supabase is not configured.")
-    return {"status": "configured"}
+    try:
+        from app.supabase_clients import create_admin_supabase_client
+
+        admin = create_admin_supabase_client(settings)
+        # Lightweight connectivity probe against a core candidate table.
+        admin.table("profiles").select("id").limit(1).execute()
+        return {"status": "reachable", "configured": True, "tables_reachable": True}
+    except ApiError:
+        return {"status": "configured", "configured": True, "tables_reachable": False, "admin_probe": "unavailable"}
+    except Exception:
+        return {"status": "configured", "configured": True, "tables_reachable": False}
 
 
 @router.get("/me/bootstrap")
@@ -59,6 +96,14 @@ def bootstrap(
     user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     client = client_for(settings, user)
+    # Opportunistic cleanup of failed ATS rows older than 7 days (candidate-owned only).
+    try:
+        cutoff = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+        client.table("ats_analyses").delete().eq("user_id", str(user.id)).eq("status", "failed").lt(
+            "created_at", cutoff
+        ).execute()
+    except Exception:
+        pass
     profile = recalculate_completion(client, user)
     active_resume = (
         client.table("resumes")
@@ -70,6 +115,13 @@ def bootstrap(
         .execute()
         .data
         or []
+    )
+    confirmed_resume = (
+        client.table("resume_versions")
+        .select("id", count="exact", head=True)
+        .eq("user_id", str(user.id))
+        .eq("extraction_status", "confirmed")
+        .execute()
     )
     latest_jd = (
         client.table("job_descriptions")
@@ -92,6 +144,8 @@ def bootstrap(
         .data
         or []
     )
+    recent_activity = list_recent_activity(client, user)
+    latest_actions = _latest_actions(client, user)
     unread = (
         client.table("user_notifications")
         .select("id", count="exact")
@@ -107,23 +161,196 @@ def bootstrap(
         "learning_paths": "learning_paths",
         "saved_jobs": "saved_jobs",
     }.items():
-        counts[key] = (
-            client.table(table)
-            .select("*", count="exact", head=True)
-            .eq("user_id", str(user.id))
-            .execute()
-            .count
-            or 0
-        )
+        query = client.table(table).select("*", count="exact", head=True).eq("user_id", str(user.id))
+        if table == "resumes":
+            query = query.is_("deleted_at", "null")
+        counts[key] = query.execute().count or 0
+    failed_ats = (
+        client.table("ats_analyses")
+        .select("id", count="exact", head=True)
+        .eq("user_id", str(user.id))
+        .eq("status", "failed")
+        .execute()
+        .count
+        or 0
+    )
     return {
         "profile": profile,
         "active_resume": active_resume[0] if active_resume else None,
         "active_job_description": latest_jd[0] if latest_jd else None,
         "latest_ats_analysis": latest_analysis[0] if latest_analysis else None,
+        "latest_actions": latest_actions,
         "unread_notification_count": unread.count or 0,
         "counts": counts,
-        "capabilities": {"ats_scoring": True, "interview_evaluation": False, "job_recommendations": False},
+        "recent_activity": recent_activity,
+        "workspace": {
+            "profile_completion": profile.get("profile_completion") or 0,
+            "has_active_resume": bool(active_resume),
+            "has_confirmed_resume": bool(confirmed_resume.count),
+            "failed_ats_count": failed_ats,
+            "ready_for_ats": bool(confirmed_resume.count) and bool(latest_jd),
+        },
+        "capabilities": {
+            "ats_scoring": True,
+            "interview_evaluation": False,
+            "job_recommendations": False,
+            "nvidia_configured": settings.nvidia_configured,
+        },
     }
+
+
+def _latest_actions(client, user: CurrentUser) -> dict[str, Any]:
+    """
+    Build dashboard "latest progress" cards from real persisted rows.
+    Uses existing tables only — simple queries (no nested joins) for reliability.
+    """
+    uid = str(user.id)
+    last_resume_upload = None
+    try:
+        versions = (
+            client.table("resume_versions")
+            .select("id,resume_id,original_filename,created_at,source_type")
+            .eq("user_id", uid)
+            .order("created_at", desc=True)
+            .limit(12)
+            .execute()
+            .data
+            or []
+        )
+        for row in versions:
+            resume_id = row.get("resume_id")
+            if not resume_id:
+                continue
+            parents = (
+                client.table("resumes")
+                .select("id,title,deleted_at")
+                .eq("id", str(resume_id))
+                .eq("user_id", uid)
+                .limit(1)
+                .execute()
+                .data
+                or []
+            )
+            parent = parents[0] if parents else {}
+            if parent.get("deleted_at"):
+                continue
+            last_resume_upload = {
+                "version_id": row.get("id"),
+                "resume_id": resume_id,
+                "title": parent.get("title") or row.get("original_filename") or "Resume",
+                "filename": row.get("original_filename"),
+                "source_type": row.get("source_type"),
+                "created_at": row.get("created_at"),
+            }
+            break
+    except Exception:
+        last_resume_upload = None
+
+    last_interview = None
+    try:
+        completed = (
+            client.table("interview_sessions")
+            .select("id,mode,target_role,target_company,status,created_at,completed_at,started_at")
+            .eq("user_id", uid)
+            .eq("status", "completed")
+            .order("completed_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        rows = completed or (
+            client.table("interview_sessions")
+            .select("id,mode,target_role,target_company,status,created_at,completed_at,started_at")
+            .eq("user_id", uid)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            row = rows[0]
+            label_parts = [part for part in (row.get("target_role"), row.get("target_company")) if part]
+            if not label_parts and row.get("mode"):
+                label_parts = [str(row["mode"]).replace("_", " ").title()]
+            last_interview = {
+                "id": row.get("id"),
+                "label": " · ".join(label_parts) if label_parts else "Mock interview",
+                "mode": row.get("mode"),
+                "status": row.get("status"),
+                "created_at": row.get("created_at"),
+                "at": row.get("completed_at") or row.get("started_at") or row.get("created_at"),
+            }
+    except Exception:
+        last_interview = None
+
+    last_job_applied = None
+    try:
+        applied = (
+            client.table("saved_jobs")
+            .select("job_id,status,saved_at,updated_at")
+            .eq("user_id", uid)
+            .eq("status", "applied")
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        rows = applied or (
+            client.table("saved_jobs")
+            .select("job_id,status,saved_at,updated_at")
+            .eq("user_id", uid)
+            .order("saved_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            row = rows[0]
+            job_id = row.get("job_id")
+            title = "Saved job"
+            company = None
+            if job_id:
+                jobs = (
+                    client.table("jobs")
+                    .select("id,title,company")
+                    .eq("id", str(job_id))
+                    .limit(1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if jobs:
+                    title = jobs[0].get("title") or title
+                    company = jobs[0].get("company")
+            last_job_applied = {
+                "job_id": job_id,
+                "title": title,
+                "company": company,
+                "label": f"{title} · {company}" if company else title,
+                "status": row.get("status"),
+                "is_application": row.get("status") == "applied",
+                "at": row.get("updated_at") if row.get("status") == "applied" else row.get("saved_at"),
+            }
+    except Exception:
+        last_job_applied = None
+
+    return {
+        "last_resume_upload": last_resume_upload,
+        "last_interview": last_interview,
+        "last_job_applied": last_job_applied,
+    }
+
+
+@router.get("/me/activity")
+def list_activity(
+    user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)
+) -> list[dict[str, Any]]:
+    """Return the candidate's retained activity feed (max 5 newest rows)."""
+    return list_recent_activity(client_for(settings, user), user)
 
 
 def _normalize_token(value: str) -> str:
@@ -213,6 +440,519 @@ def update_preferences(
         client, user, "profile_updated", "Candidate preferences updated", "preferences", str(user.id)
     )
     return result[0]
+
+
+@router.post("/profile/skills/from-resume")
+def import_skills_from_resume(
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Import deterministic skill candidates from the candidate's confirmed resume text."""
+    client = client_for(settings, user)
+    versions = (
+        client.table("resume_versions")
+        .select("id,plain_text,structured_content")
+        .eq("user_id", str(user.id))
+        .eq("extraction_status", "confirmed")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not versions:
+        raise ApiError(404, "confirmed_resume_required", "Confirm a resume before importing skills.")
+    version = versions[0]
+    text_parts = [version.get("plain_text") or ""]
+    sections = (version.get("structured_content") or {}).get("sections") or {}
+    for lines in sections.values():
+        if isinstance(lines, list):
+            text_parts.extend(str(line) for line in lines)
+    candidates = extract_skill_candidates("\n".join(text_parts))
+    existing = {
+        str(row.get("normalized_name") or "").lower()
+        for row in owned_rows(client, "candidate_skills", user)
+    }
+    created: list[dict[str, Any]] = []
+    for skill in candidates:
+        normalized = _normalize_token(skill)
+        if not normalized or normalized in existing:
+            continue
+        row = (
+            client.table("candidate_skills")
+            .insert(
+                {
+                    "user_id": str(user.id),
+                    "name": skill,
+                    "normalized_name": normalized,
+                    "source": "resume_import",
+                }
+            )
+            .execute()
+            .data[0]
+        )
+        created.append(row)
+        existing.add(normalized)
+    profile = recalculate_completion(client, user)
+    write_activity(
+        client,
+        user,
+        "skills_imported",
+        f"Imported {len(created)} skills from confirmed resume",
+        "profile",
+        str(user.id),
+    )
+    return {
+        "suggested": candidates,
+        "created": created,
+        "created_count": len(created),
+        "profile_completion": profile.get("profile_completion"),
+    }
+
+
+def _load_resume_version_for_profile_fill(
+    client, user: CurrentUser, resume_version_id: UUID | str | None
+) -> dict[str, Any]:
+    """Load a candidate-owned resume version with extractable text."""
+    if resume_version_id:
+        rows = (
+            client.table("resume_versions")
+            .select("id,resume_id,plain_text,structured_content,extraction_status,original_filename,created_at")
+            .eq("id", str(resume_version_id))
+            .eq("user_id", str(user.id))
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            raise ApiError(404, "resume_version_not_found", "The selected resume version was not found.")
+        version = rows[0]
+    else:
+        # Prefer confirmed, then any version that has text.
+        confirmed = (
+            client.table("resume_versions")
+            .select("id,resume_id,plain_text,structured_content,extraction_status,original_filename,created_at")
+            .eq("user_id", str(user.id))
+            .eq("extraction_status", "confirmed")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        version = confirmed[0] if confirmed else None
+        if not version:
+            any_rows = (
+                client.table("resume_versions")
+                .select(
+                    "id,resume_id,plain_text,structured_content,extraction_status,original_filename,created_at"
+                )
+                .eq("user_id", str(user.id))
+                .order("created_at", desc=True)
+                .limit(5)
+                .execute()
+                .data
+                or []
+            )
+            version = next((row for row in any_rows if (row.get("plain_text") or "").strip()), None)
+        if not version:
+            raise ApiError(
+                404,
+                "resume_required",
+                "Upload a resume first, or pass resume_version_id / a PDF·DOCX file.",
+            )
+
+    plain = (version.get("plain_text") or "").strip()
+    if not plain:
+        raise ApiError(
+            422,
+            "resume_has_no_text",
+            "The selected resume has no extractable text. Re-upload a text-based PDF or DOCX.",
+        )
+    return version
+
+
+def _profile_draft_response(
+    plain_text: str,
+    structured: dict[str, Any],
+    version_meta: dict[str, Any],
+) -> dict[str, Any]:
+    draft = build_profile_draft(plain_text, structured)
+    return {
+        "draft": draft,
+        "counts": draft_counts(draft),
+        "resume": version_meta,
+        "disclaimer": "Review every field before applying. Values are derived only from resume text.",
+    }
+
+
+@router.post("/profile/from-resume/preview")
+def preview_profile_from_resume(
+    payload: ProfileFromResumePreviewRequest | None = Body(default=None),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Build a reviewable profile draft from a stored resume version.
+    Pass resume_version_id or omit to use the latest confirmed/stored resume with text.
+    Does not write profile tables until /profile/from-resume/apply.
+    """
+    client = client_for(settings, user)
+    version_id = payload.resume_version_id if payload else None
+    version = _load_resume_version_for_profile_fill(client, user, version_id)
+    plain_text = version.get("plain_text") or ""
+    structured = version.get("structured_content") or {}
+    if not isinstance(structured, dict) or not structured.get("sections"):
+        structured = extract_sections(plain_text)
+    return _profile_draft_response(
+        plain_text,
+        structured if isinstance(structured, dict) else {},
+        {
+            "id": version.get("id"),
+            "resume_id": version.get("resume_id"),
+            "original_filename": version.get("original_filename"),
+            "extraction_status": version.get("extraction_status"),
+            "source": "stored_version",
+        },
+    )
+
+
+@router.post("/profile/from-resume/preview-upload")
+async def preview_profile_from_resume_upload(
+    file: UploadFile = File(...),
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Build a reviewable profile draft from an uploaded PDF/DOCX without requiring
+    a prior resume library entry. Does not write profile tables.
+    """
+    raw = await file.read()
+    mime = validate_document(
+        file.filename or "resume.pdf", file.content_type, raw, settings.document_max_bytes
+    )
+    plain_text = extract_text(raw, mime)
+    structured = extract_sections(plain_text)
+    return _profile_draft_response(
+        plain_text,
+        structured,
+        {
+            "id": None,
+            "original_filename": safe_filename(file.filename or "resume"),
+            "source": "upload",
+        },
+    )
+
+
+@router.post("/profile/from-resume/apply")
+def apply_profile_from_resume(
+    payload: ProfileFromResumeApplyRequest,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """
+    Persist a reviewed resume-derived draft into profiles + candidate_* tables.
+    Default fill_empty_only=True avoids overwriting existing profile fields.
+    """
+    client = client_for(settings, user)
+    uid = str(user.id)
+    created: dict[str, int] = {
+        "skills": 0,
+        "experiences": 0,
+        "education": 0,
+        "projects": 0,
+        "certifications": 0,
+        "languages": 0,
+        "links": 0,
+    }
+    updated_profile_fields: list[str] = []
+
+    # --- profile core fields ---
+    current_profile = (
+        client.table("profiles").select("*").eq("id", uid).single().execute().data or {}
+    )
+    profile_patch: dict[str, Any] = {}
+    allowed = {
+        "full_name",
+        "headline",
+        "bio",
+        "phone",
+        "location",
+        "current_role",
+        "years_experience",
+        "career_level",
+        "career_goal",
+    }
+    incoming = payload.profile or {}
+    # Support draft shape { selected: true, full_name: ... }
+    if incoming.get("selected") is False:
+        incoming = {}
+    for key in allowed:
+        if key not in incoming:
+            continue
+        value = incoming.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value and key != "bio":
+                continue
+            if len(value) > 4000:
+                value = value[:4000]
+        if key == "years_experience":
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value < 0 or value > 80:
+                continue
+        existing = current_profile.get(key)
+        empty_existing = existing is None or (isinstance(existing, str) and not str(existing).strip())
+        if payload.fill_empty_only and not empty_existing:
+            continue
+        profile_patch[key] = value
+        updated_profile_fields.append(key)
+
+    if profile_patch:
+        client.table("profiles").update(profile_patch).eq("id", uid).execute()
+
+    def _selected(row: dict[str, Any]) -> bool:
+        return row.get("selected", True) is not False
+
+    # --- skills ---
+    existing_skills = {
+        str(row.get("normalized_name") or "").lower()
+        for row in owned_rows(client, "candidate_skills", user)
+    }
+    for row in payload.skills or []:
+        if not _selected(row):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        normalized = _normalize_token(str(row.get("normalized_name") or name))
+        if not normalized or normalized in existing_skills:
+            continue
+        try:
+            client.table("candidate_skills").insert(
+                {
+                    "user_id": uid,
+                    "name": name[:120],
+                    "normalized_name": normalized,
+                    "source": str(row.get("source") or "resume_import")[:40],
+                }
+            ).execute()
+            existing_skills.add(normalized)
+            created["skills"] += 1
+        except Exception:
+            continue
+
+    # --- experiences ---
+    existing_exp = {
+        (
+            _normalize_token(str(row.get("company_name") or "")),
+            _normalize_token(str(row.get("role_title") or "")),
+        )
+        for row in owned_rows(client, "candidate_experiences", user)
+    }
+    for index, row in enumerate(payload.experiences or []):
+        if not _selected(row):
+            continue
+        company = str(row.get("company_name") or "").strip()
+        role = str(row.get("role_title") or "").strip()
+        if not company or not role:
+            continue
+        key = (_normalize_token(company), _normalize_token(role))
+        if key in existing_exp:
+            continue
+        try:
+            client.table("candidate_experiences").insert(
+                {
+                    "user_id": uid,
+                    "company_name": company[:200],
+                    "role_title": role[:200],
+                    "location": (str(row["location"]).strip()[:160] if row.get("location") else None),
+                    "employment_type": (
+                        str(row["employment_type"]).strip()[:80] if row.get("employment_type") else None
+                    ),
+                    "summary": (str(row["summary"]).strip()[:4000] if row.get("summary") else None),
+                    "is_current": bool(row.get("is_current")),
+                    "display_order": int(row.get("display_order") or index),
+                }
+            ).execute()
+            existing_exp.add(key)
+            created["experiences"] += 1
+        except Exception:
+            continue
+
+    # --- education ---
+    existing_edu = {
+        (
+            _normalize_token(str(row.get("institution") or "")),
+            _normalize_token(str(row.get("degree") or "")),
+        )
+        for row in owned_rows(client, "candidate_education", user)
+    }
+    for index, row in enumerate(payload.education or []):
+        if not _selected(row):
+            continue
+        institution = str(row.get("institution") or "").strip()
+        if not institution:
+            continue
+        degree = str(row.get("degree") or "").strip() or None
+        key = (_normalize_token(institution), _normalize_token(degree or ""))
+        if key in existing_edu:
+            continue
+        try:
+            client.table("candidate_education").insert(
+                {
+                    "user_id": uid,
+                    "institution": institution[:200],
+                    "degree": degree[:160] if degree else None,
+                    "field_of_study": (
+                        str(row["field_of_study"]).strip()[:160] if row.get("field_of_study") else None
+                    ),
+                    "grade": (str(row["grade"]).strip()[:80] if row.get("grade") else None),
+                    "description": (str(row["description"]).strip()[:2000] if row.get("description") else None),
+                    "display_order": int(row.get("display_order") or index),
+                }
+            ).execute()
+            existing_edu.add(key)
+            created["education"] += 1
+        except Exception:
+            continue
+
+    # --- projects ---
+    existing_projects = {
+        _normalize_token(str(row.get("title") or "")) for row in owned_rows(client, "candidate_projects", user)
+    }
+    for index, row in enumerate(payload.projects or []):
+        if not _selected(row):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        key = _normalize_token(title)
+        if key in existing_projects:
+            continue
+        try:
+            client.table("candidate_projects").insert(
+                {
+                    "user_id": uid,
+                    "title": title[:200],
+                    "role": (str(row["role"]).strip()[:160] if row.get("role") else None),
+                    "description": (str(row["description"]).strip()[:4000] if row.get("description") else None),
+                    "skills": row.get("skills") if isinstance(row.get("skills"), list) else [],
+                    "display_order": int(row.get("display_order") or index),
+                }
+            ).execute()
+            existing_projects.add(key)
+            created["projects"] += 1
+        except Exception:
+            continue
+
+    # --- certifications ---
+    existing_certs = {
+        _normalize_token(str(row.get("name") or ""))
+        for row in owned_rows(client, "candidate_certifications", user)
+    }
+    for row in payload.certifications or []:
+        if not _selected(row):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        key = _normalize_token(name)
+        if key in existing_certs:
+            continue
+        try:
+            client.table("candidate_certifications").insert(
+                {
+                    "user_id": uid,
+                    "name": name[:200],
+                    "issuer": (str(row["issuer"]).strip()[:160] if row.get("issuer") else None),
+                }
+            ).execute()
+            existing_certs.add(key)
+            created["certifications"] += 1
+        except Exception:
+            continue
+
+    # --- languages ---
+    existing_langs = {
+        str(row.get("normalized_language") or "").lower()
+        for row in owned_rows(client, "candidate_languages", user)
+    }
+    for index, row in enumerate(payload.languages or []):
+        if not _selected(row):
+            continue
+        language = str(row.get("language") or "").strip()
+        if not language:
+            continue
+        normalized = _normalize_token(language)
+        if not normalized or normalized in existing_langs:
+            continue
+        try:
+            client.table("candidate_languages").insert(
+                {
+                    "user_id": uid,
+                    "language": language[:80],
+                    "normalized_language": normalized,
+                    "proficiency": (str(row["proficiency"]).strip()[:80] if row.get("proficiency") else None),
+                    "display_order": int(row.get("display_order") or index),
+                }
+            ).execute()
+            existing_langs.add(normalized)
+            created["languages"] += 1
+        except Exception:
+            continue
+
+    # --- links ---
+    existing_links = {
+        str(row.get("url") or "").strip().lower() for row in owned_rows(client, "candidate_links", user)
+    }
+    allowed_link_types = {"linkedin", "github", "portfolio", "website", "other"}
+    for index, row in enumerate(payload.links or []):
+        if not _selected(row):
+            continue
+        url = str(row.get("url") or "").strip()
+        link_type = str(row.get("link_type") or "other").strip().lower()
+        if not url or link_type not in allowed_link_types:
+            continue
+        if url.lower() in existing_links:
+            continue
+        try:
+            client.table("candidate_links").insert(
+                {
+                    "user_id": uid,
+                    "link_type": link_type,
+                    "url": url[:500],
+                    "label": (str(row["label"]).strip()[:120] if row.get("label") else None),
+                    "display_order": int(row.get("display_order") or index),
+                }
+            ).execute()
+            existing_links.add(url.lower())
+            created["links"] += 1
+        except Exception:
+            continue
+
+    profile = recalculate_completion(client, user)
+    write_activity(
+        client,
+        user,
+        "profile_filled_from_resume",
+        "Profile filled from resume draft",
+        "profile",
+        uid,
+    )
+    return {
+        "profile": profile,
+        "updated_profile_fields": updated_profile_fields,
+        "created": created,
+        "fill_empty_only": payload.fill_empty_only,
+        "profile_completion": profile.get("profile_completion"),
+    }
 
 
 @router.get("/profile/{resource}")
@@ -347,25 +1087,65 @@ def _upload_resume_version(
 
 @router.get("/resumes")
 def list_resumes(user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
-    return owned_rows(client_for(settings, user), "resumes", user, "created_at")
+    client = client_for(settings, user)
+    rows = (
+        client.table("resumes")
+        .select("*")
+        .eq("user_id", str(user.id))
+        .is_("deleted_at", "null")
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    for row in rows:
+        versions = (
+            client.table("resume_versions")
+            .select(
+                "id,version_number,original_filename,mime_type,extraction_status,created_at,size_bytes"
+            )
+            .eq("resume_id", row["id"])
+            .eq("user_id", str(user.id))
+            .order("version_number", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        row["latest_version"] = versions[0] if versions else None
+    return rows
 
 
 @router.post("/resumes", status_code=201)
 def create_resume(
-    title: str = Form(...),
     file: UploadFile = File(...),
+    title: str | None = Form(default=None),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
     client = client_for(settings, user)
     resume_id = str(uuid.uuid4())
+    profile_name = ""
+    try:
+        profile_row = (
+            client.table("profiles").select("full_name").eq("id", str(user.id)).single().execute().data or {}
+        )
+        profile_name = str(profile_row.get("full_name") or "").strip()
+    except Exception:
+        profile_name = ""
+    if (title or "").strip():
+        resume_title = title.strip()
+    elif profile_name:
+        resume_title = f"{profile_name} Resume"[:200]
+    else:
+        resume_title = infer_resume_title(file.filename)
     resume = (
         client.table("resumes")
         .insert(
             {
                 "id": resume_id,
                 "user_id": str(user.id),
-                "title": title,
+                "title": resume_title,
                 "is_active": not bool(owned_rows(client, "resumes", user)),
             }
         )
@@ -429,6 +1209,69 @@ def delete_resume(
     client.table("resumes").update({"deleted_at": utc_now(), "is_active": False}).eq("id", str(resume_id)).eq(
         "user_id", str(user.id)
     ).execute()
+    recalculate_completion(client, user)
+    write_activity(client, user, "resume_deleted", "Resume deleted", "resume", str(resume_id))
+
+
+@router.get("/resumes/{resume_id}/preview")
+def preview_resume(
+    resume_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Return extracted resume text plus a short-lived signed URL for the original file."""
+    client = client_for(settings, user)
+    resume = owned_row(client, "resumes", resume_id, user)
+    if resume.get("deleted_at"):
+        raise ApiError(404, "record_not_found", "The requested record was not found.")
+    versions = (
+        client.table("resume_versions")
+        .select(
+            "id,version_number,original_filename,mime_type,extraction_status,created_at,"
+            "plain_text,structured_content,storage_path,size_bytes"
+        )
+        .eq("resume_id", str(resume_id))
+        .eq("user_id", str(user.id))
+        .order("version_number", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not versions:
+        raise ApiError(404, "resume_version_not_found", "No resume version is available to preview.")
+    version = versions[0]
+    download_url = None
+    storage_path = version.get("storage_path")
+    if storage_path:
+        try:
+            response = client.storage.from_(settings.document_bucket).create_signed_url(
+                storage_path, settings.export_signed_url_seconds
+            )
+            download_url = response.get("signedURL") or response.get("signed_url")
+        except Exception:
+            download_url = None
+    return {
+        "resume": {
+            "id": resume.get("id"),
+            "title": resume.get("title"),
+            "is_active": resume.get("is_active"),
+            "created_at": resume.get("created_at"),
+        },
+        "version": {
+            "id": version.get("id"),
+            "version_number": version.get("version_number"),
+            "original_filename": version.get("original_filename"),
+            "mime_type": version.get("mime_type"),
+            "extraction_status": version.get("extraction_status"),
+            "created_at": version.get("created_at"),
+            "size_bytes": version.get("size_bytes"),
+            "plain_text": version.get("plain_text") or "",
+            "structured_content": version.get("structured_content") or {},
+        },
+        "download_url": download_url,
+        "expires_in": settings.export_signed_url_seconds if download_url else 0,
+    }
 
 
 @router.post("/resumes/{resume_id}/activate")
@@ -531,8 +1374,15 @@ def create_jd(
 ):
     client = client_for(settings, user)
     structured = extract_sections(payload.raw_text, "jd-extraction-v1")
+    inferred = infer_job_metadata(payload.raw_text)
+    title = (payload.title or "").strip() or inferred["title"] or "Job description"
+    role_title = (payload.role_title or "").strip() or inferred["role_title"]
+    company = (payload.company or "").strip() or inferred["company"]
     record = {
-        **payload.model_dump(),
+        "title": title,
+        "company": company,
+        "role_title": role_title,
+        "raw_text": payload.raw_text,
         "user_id": str(user.id),
         "input_type": "text",
         "structured_content": structured,
@@ -548,10 +1398,10 @@ def create_jd(
 
 @router.post("/job-descriptions/upload", status_code=201)
 def upload_jd(
-    title: str = Form(...),
+    file: UploadFile = File(...),
+    title: str | None = Form(default=None),
     company: str | None = Form(default=None),
     role_title: str | None = Form(default=None),
-    file: UploadFile = File(...),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
@@ -561,6 +1411,10 @@ def upload_jd(
     )
     text = extract_text(content, mime)
     structured = extract_sections(text, "jd-extraction-v1")
+    inferred = infer_job_metadata(text)
+    resolved_title = (title or "").strip() or inferred["title"] or infer_resume_title(file.filename)
+    resolved_role = (role_title or "").strip() or inferred["role_title"]
+    resolved_company = (company or "").strip() or inferred["company"]
     client = client_for(settings, user)
     jd_id = str(uuid.uuid4())
     suffix = ".pdf" if mime == "application/pdf" else ".docx"
@@ -572,9 +1426,9 @@ def upload_jd(
         record = {
             "id": jd_id,
             "user_id": str(user.id),
-            "title": title,
-            "company": company,
-            "role_title": role_title,
+            "title": resolved_title,
+            "company": resolved_company,
+            "role_title": resolved_role,
             "input_type": "pdf" if mime == "application/pdf" else "docx",
             "original_filename": safe_filename(file.filename or "document"),
             "storage_path": path,
@@ -608,6 +1462,44 @@ def get_jd(
     jd_id: UUID, user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)
 ):
     return owned_row(client_for(settings, user), "job_descriptions", jd_id, user)
+
+
+@router.patch("/job-descriptions/{jd_id}/metadata")
+def patch_jd_metadata(
+    jd_id: UUID,
+    payload: JobDescriptionMetadataPatch,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Allow candidate override of auto-detected role/company/title."""
+    client = client_for(settings, user)
+    owned_row(client, "job_descriptions", jd_id, user)
+    updates = {key: value for key, value in payload.model_dump(exclude_none=True).items()}
+    if not updates:
+        raise ApiError(400, "empty_metadata_patch", "Provide at least one metadata field to update.")
+    if "role_title" in updates or "company" in updates:
+        role = updates.get("role_title")
+        company = updates.get("company")
+        if role is None or company is None:
+            current = owned_row(client, "job_descriptions", jd_id, user)
+            role = role if role is not None else current.get("role_title")
+            company = company if company is not None else current.get("company")
+        if role and company:
+            updates.setdefault("title", f"{role} · {company}"[:200])
+        elif role:
+            updates.setdefault("title", str(role)[:200])
+    result = (
+        client.table("job_descriptions")
+        .update(updates)
+        .eq("id", str(jd_id))
+        .eq("user_id", str(user.id))
+        .execute()
+        .data[0]
+    )
+    write_activity(
+        client, user, "job_description_updated", "Job description metadata updated", "job_description", str(jd_id)
+    )
+    return result
 
 
 @router.patch("/job-descriptions/{jd_id}/extraction")
@@ -660,15 +1552,33 @@ def _enrich_ats_analysis(client, user: CurrentUser, analysis: dict[str, Any]) ->
     try:
         version = owned_row(client, "resume_versions", analysis["resume_version_id"], user)
         resume = owned_row(client, "resumes", version["resume_id"], user)
-        enriched["resume"] = {
-            "id": resume.get("id"),
-            "title": resume.get("title"),
-            "original_filename": version.get("original_filename"),
-            "version_number": version.get("version_number"),
-            "created_at": version.get("created_at"),
-        }
+        if resume.get("deleted_at"):
+            enriched["resume"] = {
+                "id": resume.get("id"),
+                "title": resume.get("title") or "Deleted resume",
+                "original_filename": version.get("original_filename"),
+                "version_number": version.get("version_number"),
+                "created_at": version.get("created_at"),
+                "unavailable": True,
+            }
+        else:
+            enriched["resume"] = {
+                "id": resume.get("id"),
+                "title": resume.get("title"),
+                "original_filename": version.get("original_filename"),
+                "version_number": version.get("version_number"),
+                "created_at": version.get("created_at"),
+                "unavailable": False,
+            }
     except ApiError:
-        enriched["resume"] = None
+        enriched["resume"] = {
+            "id": None,
+            "title": "Resume unavailable",
+            "original_filename": None,
+            "version_number": None,
+            "created_at": None,
+            "unavailable": True,
+        }
     try:
         job = owned_row(client, "job_descriptions", analysis["job_description_id"], user)
         enriched["job_description"] = {
@@ -679,9 +1589,19 @@ def _enrich_ats_analysis(client, user: CurrentUser, analysis: dict[str, Any]) ->
             "input_type": job.get("input_type"),
             "original_filename": job.get("original_filename"),
             "created_at": job.get("created_at"),
+            "unavailable": False,
         }
     except ApiError:
-        enriched["job_description"] = None
+        enriched["job_description"] = {
+            "id": None,
+            "title": "Job description unavailable",
+            "company": None,
+            "role_title": None,
+            "input_type": None,
+            "original_filename": None,
+            "created_at": None,
+            "unavailable": True,
+        }
     return enriched
 
 
@@ -689,8 +1609,8 @@ def _enrich_ats_analysis(client, user: CurrentUser, analysis: dict[str, Any]) ->
 def list_ats(user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
     client = client_for(settings, user)
     analyses = owned_rows(client, "ats_analyses", user, "created_at")
-    # Newest first for the history view.
-    analyses = list(reversed(analyses))
+    # Newest first for the history view; hide long-failed noise.
+    analyses = [row for row in reversed(analyses) if row.get("status") != "failed"]
     return [_enrich_ats_analysis(client, user, row) for row in analyses]
 
 
@@ -702,6 +1622,39 @@ def get_ats(
 ):
     client = client_for(settings, user)
     return _enrich_ats_analysis(client, user, owned_row(client, "ats_analyses", analysis_id, user))
+
+
+@router.delete("/ats-analyses/{analysis_id}", status_code=204)
+def delete_ats(
+    analysis_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Delete a candidate-owned ATS analysis (evidence cascades in DB)."""
+    client = client_for(settings, user)
+    owned_row(client, "ats_analyses", analysis_id, user)
+    # Clear optional FKs that are not ON DELETE CASCADE.
+    try:
+        client.table("resume_improvement_runs").update({"ats_analysis_id": None}).eq(
+            "ats_analysis_id", str(analysis_id)
+        ).eq("user_id", str(user.id)).execute()
+    except Exception:
+        pass
+    try:
+        client.table("resume_suggestions").update({"analysis_id": None}).eq(
+            "analysis_id", str(analysis_id)
+        ).eq("user_id", str(user.id)).execute()
+    except Exception:
+        pass
+    client.table("ats_analyses").delete().eq("id", str(analysis_id)).eq("user_id", str(user.id)).execute()
+    write_activity(
+        client,
+        user,
+        "ats_analysis_deleted",
+        "ATS analysis deleted",
+        "ats_analysis",
+        str(analysis_id),
+    )
 
 
 @router.post("/ats-analyses", status_code=201)
@@ -770,11 +1723,9 @@ def create_ats(
                 "match_status": "strong_match" if item.matched else "not_found",
                 "score_contribution": item.score_contribution,
                 "rule_id": "exact_normalized_keyword",
-                "explanation": (
-                    "The normalized term appears in the resume."
-                    if item.matched
-                    else "The normalized term was not found in the resume."
-                ),
+                "explanation": item.explanation
+                if item.matched
+                else "",
             }
             for item in score.evidence
         ]
@@ -1152,18 +2103,52 @@ def update_privacy(
 
 @router.delete("/account", status_code=204)
 def delete_account(
+    payload: AccountDeleteRequest | None = Body(default=None),
     x_confirm_delete: str | None = Header(default=None),
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    if x_confirm_delete != "DELETE MY ACCOUNT":
+    """
+    Permanently delete the signed-in candidate account and all owned data.
+
+    Confirmation (required): body.confirmation or header X-Confirm-Delete must equal
+    "DELETE MY ACCOUNT". Optional body.email must match the account email when provided.
+
+    Steps:
+      1) Collect storage paths from owned rows (user-scoped client / RLS)
+      2) Purge storage objects (admin client)
+      3) Delete auth.users row (admin) — public tables cascade via ON DELETE CASCADE
+    """
+    confirmation = (payload.confirmation if payload else None) or x_confirm_delete
+    if not confirmation_is_valid(confirmation):
         raise ApiError(
             400,
             "account_deletion_confirmation_required",
-            "Explicit account deletion confirmation is required.",
+            f'Explicit confirmation is required. Type exactly: {CONFIRM_PHRASE}',
         )
+    provided_email = payload.email if payload else None
+    if not email_matches_account(provided_email, user.email):
+        raise ApiError(
+            400,
+            "account_deletion_email_mismatch",
+            "The email does not match this signed-in account.",
+        )
+
+    user_client = client_for(settings, user)
+    storage_paths = collect_user_storage_paths(user_client, user)
+
     admin = create_admin_supabase_client(settings)
+    try:
+        purge_user_storage(admin, settings, user, storage_paths)
+    except Exception:
+        # Continue: auth delete still cascades DB rows; storage is best-effort.
+        pass
+
     try:
         admin.auth.admin.delete_user(str(user.id))
     except Exception as exc:
-        raise ApiError(500, "account_deletion_failed", "The account could not be deleted.") from exc
+        raise ApiError(
+            500,
+            "account_deletion_failed",
+            "The account could not be deleted. Confirm SUPABASE_SECRET_KEY is set on the API.",
+        ) from exc

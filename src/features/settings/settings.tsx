@@ -494,6 +494,24 @@ function MultiOptionGroup({
   );
 }
 
+type ResumeListItem = {
+  id: string;
+  title: string;
+  latest_version?: { id: string; original_filename?: string; extraction_status?: string } | null;
+};
+
+type ProfileDraft = {
+  profile: ProfileRecord;
+  skills: ProfileRecord[];
+  experiences: ProfileRecord[];
+  education: ProfileRecord[];
+  projects?: ProfileRecord[];
+  certifications?: ProfileRecord[];
+  languages?: ProfileRecord[];
+  links: ProfileRecord[];
+  meta?: { warnings?: string[]; email_detected?: string | null; method?: string };
+};
+
 export function ProfileSettings() {
   const [form, setForm] = useState<ProfileRecord>({});
   const [prefDraft, setPrefDraft] = useState<PrefDraft>(emptyPrefDraft());
@@ -515,6 +533,12 @@ export function ProfileSettings() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [resumes, setResumes] = useState<ResumeListItem[]>([]);
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [fillBusy, setFillBusy] = useState(false);
+  const [fillEmptyOnly, setFillEmptyOnly] = useState(true);
+  const [draft, setDraft] = useState<ProfileDraft | null>(null);
+  const [draftDisclaimer, setDraftDisclaimer] = useState("");
 
   const applyProfile = useCallback((profile: ProfileRecord | null | undefined) => {
     setForm(profile || {});
@@ -559,10 +583,14 @@ export function ProfileSettings() {
       apiRequest<ProfileRecord[]>("/profile/experiences"),
       apiRequest<ProfileRecord[]>("/profile/education"),
       apiRequest<ProfileRecord[]>("/profile/links"),
+      apiRequest<ResumeListItem[]>("/resumes").catch(() => [] as ResumeListItem[]),
     ])
-      .then(([profilePayload, skillRows, experienceRows, educationRows, linkRows]) => {
+      .then(([profilePayload, skillRows, experienceRows, educationRows, linkRows, resumeRows]) => {
         if (!active) return;
         applyLoaded(profilePayload, skillRows, experienceRows, educationRows, linkRows);
+        setResumes(resumeRows || []);
+        const firstVersion = resumeRows?.find((r) => r.latest_version?.id)?.latest_version?.id || "";
+        setSelectedVersionId(firstVersion);
       })
       .catch((e: Error) => {
         if (active) setError(e.message);
@@ -574,6 +602,112 @@ export function ProfileSettings() {
       active = false;
     };
   }, [applyLoaded]);
+
+  async function previewFromStoredResume() {
+    setFillBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const body = selectedVersionId ? { resume_version_id: selectedVersionId } : {};
+      const result = await apiRequest<{
+        draft: ProfileDraft;
+        disclaimer?: string;
+        counts?: Record<string, number>;
+      }>("/profile/from-resume/preview", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setDraft(result.draft);
+      setDraftDisclaimer(result.disclaimer || "");
+      const countText = result.counts
+        ? Object.entries(result.counts)
+            .filter(([, n]) => n > 0)
+            .map(([k, n]) => `${n} ${k}`)
+            .join(", ")
+        : "";
+      setMessage(countText ? `Draft ready: ${countText}. Review and apply below.` : "Draft ready. Review and apply below.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFillBusy(false);
+    }
+  }
+
+  async function previewFromUpload(file: File | null) {
+    if (!file) return;
+    setFillBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const result = await apiRequest<{ draft: ProfileDraft; disclaimer?: string; counts?: Record<string, number> }>(
+        "/profile/from-resume/preview-upload",
+        { method: "POST", body: formData },
+      );
+      setDraft(result.draft);
+      setDraftDisclaimer(result.disclaimer || "");
+      setMessage("Draft built from uploaded resume. Review and apply below.");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFillBusy(false);
+    }
+  }
+
+  function toggleDraftItem(section: keyof ProfileDraft, index: number) {
+    setDraft((current) => {
+      if (!current) return current;
+      const rows = [...((current[section] as ProfileRecord[]) || [])];
+      if (!rows[index]) return current;
+      rows[index] = { ...rows[index], selected: rows[index].selected === false };
+      return { ...current, [section]: rows };
+    });
+  }
+
+  async function applyResumeDraft() {
+    if (!draft) return;
+    setFillBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const pick = (rows: ProfileRecord[] | undefined) =>
+        (rows || []).filter((row) => row.selected !== false);
+      const result = await apiRequest<{
+        created: Record<string, number>;
+        updated_profile_fields: string[];
+        profile_completion?: number;
+      }>("/profile/from-resume/apply", {
+        method: "POST",
+        body: JSON.stringify({
+          fill_empty_only: fillEmptyOnly,
+          profile: draft.profile?.selected === false ? {} : draft.profile || {},
+          skills: pick(draft.skills),
+          experiences: pick(draft.experiences),
+          education: pick(draft.education),
+          projects: pick(draft.projects),
+          certifications: pick(draft.certifications),
+          languages: pick(draft.languages),
+          links: pick(draft.links),
+        }),
+      });
+      await loadAll();
+      const createdParts = Object.entries(result.created || {})
+        .filter(([, n]) => n > 0)
+        .map(([k, n]) => `${n} ${k}`);
+      const fields = result.updated_profile_fields?.length
+        ? `Updated profile fields: ${result.updated_profile_fields.join(", ")}.`
+        : "No core profile fields changed (empty-only mode or already filled).";
+      setMessage(
+        `Profile fill applied. ${fields}${createdParts.length ? ` Added ${createdParts.join(", ")}.` : ""} Completion: ${result.profile_completion ?? "—"}%.`,
+      );
+      setDraft(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setFillBusy(false);
+    }
+  }
 
   function updateField(key: string, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -665,6 +799,26 @@ export function ProfileSettings() {
       setSkillName("");
       await loadAll();
       setMessage("Skill saved to your account.");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  async function importSkillsFromResume() {
+    setError("");
+    setMessage("");
+    try {
+      const result = await apiRequest<{ created_count: number; suggested: string[] }>("/profile/skills/from-resume", {
+        method: "POST",
+      });
+      await loadAll();
+      setMessage(
+        result.created_count
+          ? `Imported ${result.created_count} skill(s) from your confirmed resume.`
+          : result.suggested?.length
+            ? "No new skills to import — matching skills already exist on your profile."
+            : "No known skills were detected in your confirmed resume.",
+      );
     } catch (e) {
       setError((e as Error).message);
     }
@@ -768,6 +922,173 @@ export function ProfileSettings() {
           <Card className={`stack completion-panel ${profileComplete ? "is-complete" : ""}`} aria-hidden={profileComplete}>
             <Progress value={completion} label="Profile completion" />
           </Card>
+
+          <Card className="stack panel-blue">
+            <h2 style={{ margin: 0 }}>Fill profile from resume</h2>
+            <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
+              Upload a resume or pick one already saved. We extract a draft for you to review — nothing is written until
+              you apply.
+            </p>
+            <div className="grid-2">
+              <label className="field-label">
+                Saved resume
+                <Select
+                  value={selectedVersionId}
+                  onChange={(e) => setSelectedVersionId(e.target.value)}
+                >
+                  <option value="">Latest resume with text</option>
+                  {resumes.map((resume) =>
+                    resume.latest_version?.id ? (
+                      <option key={resume.latest_version.id} value={resume.latest_version.id}>
+                        {resume.title}
+                        {resume.latest_version.original_filename
+                          ? ` · ${resume.latest_version.original_filename}`
+                          : ""}
+                      </option>
+                    ) : null,
+                  )}
+                </Select>
+              </label>
+              <label className="field-label">
+                Or upload PDF / DOCX
+                <Input
+                  type="file"
+                  accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  disabled={fillBusy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    void previewFromUpload(file);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
+            <label className="row" style={{ justifyContent: "flex-start", gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={fillEmptyOnly}
+                onChange={(e) => setFillEmptyOnly(e.target.checked)}
+              />
+              <span>Only fill empty profile fields (recommended)</span>
+            </label>
+            <div className="cluster">
+              <Button type="button" disabled={fillBusy} onClick={() => void previewFromStoredResume()}>
+                {fillBusy ? "Working…" : "Preview from saved resume"}
+              </Button>
+              {draft ? (
+                <>
+                  <Button type="button" disabled={fillBusy} onClick={() => void applyResumeDraft()}>
+                    {fillBusy ? "Applying…" : "Apply selected draft"}
+                  </Button>
+                  <Button type="button" variant="secondary" disabled={fillBusy} onClick={() => setDraft(null)}>
+                    Discard draft
+                  </Button>
+                </>
+              ) : null}
+            </div>
+            {draftDisclaimer ? <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>{draftDisclaimer}</p> : null}
+            {draft?.meta?.warnings?.length ? (
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {draft.meta.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+            {draft ? (
+              <div className="stack" style={{ gap: 12 }}>
+                <div className="suggestion stack" style={{ gap: 6 }}>
+                  <strong>Profile fields</strong>
+                  <label className="row" style={{ justifyContent: "flex-start", gap: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={draft.profile?.selected !== false}
+                      onChange={() =>
+                        setDraft((current) =>
+                          current
+                            ? {
+                                ...current,
+                                profile: {
+                                  ...current.profile,
+                                  selected: current.profile?.selected === false,
+                                },
+                              }
+                            : current,
+                        )
+                      }
+                    />
+                    <span>
+                      {[
+                        draft.profile?.full_name,
+                        draft.profile?.current_role,
+                        draft.profile?.location,
+                        draft.profile?.phone,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "No core profile fields detected"}
+                    </span>
+                  </label>
+                  {draft.profile?.headline ? (
+                    <p style={{ margin: 0, fontSize: "var(--text-sm)" }}>{draft.profile.headline}</p>
+                  ) : null}
+                </div>
+                {(
+                  [
+                    ["skills", "Skills", (row: ProfileRecord) => row.name],
+                    [
+                      "experiences",
+                      "Experience",
+                      (row: ProfileRecord) => `${row.role_title || "Role"} · ${row.company_name || ""}`,
+                    ],
+                    [
+                      "education",
+                      "Education",
+                      (row: ProfileRecord) =>
+                        [row.degree, row.institution].filter(Boolean).join(" · ") || row.institution,
+                    ],
+                    ["projects", "Projects", (row: ProfileRecord) => row.title],
+                    ["certifications", "Certifications", (row: ProfileRecord) => row.name],
+                    ["languages", "Languages", (row: ProfileRecord) => row.language],
+                    ["links", "Links", (row: ProfileRecord) => `${row.link_type}: ${row.url}`],
+                  ] as Array<[keyof ProfileDraft, string, (row: ProfileRecord) => string]>
+                ).map(([key, label, render]) => {
+                  const rows = (draft[key] as ProfileRecord[] | undefined) || [];
+                  if (!rows.length) return null;
+                  return (
+                    <div key={key} className="suggestion stack" style={{ gap: 6 }}>
+                      <strong>
+                        {label} ({rows.length})
+                      </strong>
+                      {rows.map((row, index) => (
+                        <label key={`${key}-${index}`} className="row" style={{ justifyContent: "flex-start", gap: 8 }}>
+                          <input
+                            type="checkbox"
+                            checked={row.selected !== false}
+                            onChange={() => toggleDraftItem(key, index)}
+                          />
+                          <span style={{ fontSize: "var(--text-sm)" }}>{render(row)}</span>
+                        </label>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </Card>
+
+          {(message || error) && (
+            <Card className="stack">
+              {error ? (
+                <p role="alert" className="field-error" style={{ margin: 0 }}>
+                  {error}
+                </p>
+              ) : null}
+              {message ? (
+                <p role="status" style={{ margin: 0 }}>
+                  {message}
+                </p>
+              ) : null}
+            </Card>
+          )}
 
           <Card className="stack">
             <h2 style={{ margin: 0 }}>Basic details</h2>
@@ -967,6 +1288,9 @@ export function ProfileSettings() {
               </div>
               <Button onClick={addSkill} disabled={!skillName.trim()}>
                 Add skill
+              </Button>
+              <Button variant="secondary" onClick={importSkillsFromResume}>
+                Import from resume
               </Button>
             </div>
             <div className="cluster">
@@ -1194,33 +1518,180 @@ export function ProfileSettings() {
   );
 }
 
+const DELETE_ACCOUNT_PHRASE = "DELETE MY ACCOUNT";
+
 export function AccountSettings() {
   const router = useRouter();
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [confirmEmail, setConfirmEmail] = useState("");
+  const [confirmPhrase, setConfirmPhrase] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [showDeletePanel, setShowDeletePanel] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const supabase = createClient();
+      if (!supabase) return;
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (active && user?.email) setAccountEmail(user.email);
+    })().catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
   async function logout() {
     await createClient()?.auth.signOut();
     router.replace("/");
     router.refresh();
   }
+
   async function change() {
+    setError("");
+    setMessage("");
     const email = prompt("Enter your account email to receive a recovery link");
     if (!email) return;
     const result = await createClient()?.auth.resetPasswordForEmail(email, {
       redirectTo: `${location.origin}/auth/callback?next=/reset-password`,
     });
     if (result?.error) setError(result.error.message);
+    else setMessage("If that email is registered, a recovery link has been sent.");
   }
+
+  async function deleteAccount() {
+    setError("");
+    setMessage("");
+    if (confirmPhrase.trim() !== DELETE_ACCOUNT_PHRASE) {
+      setError(`Type exactly ${DELETE_ACCOUNT_PHRASE} to confirm.`);
+      return;
+    }
+    if (accountEmail && confirmEmail.trim().toLowerCase() !== accountEmail.toLowerCase()) {
+      setError("Email does not match your signed-in account.");
+      return;
+    }
+    const ok = window.confirm(
+      "This permanently deletes your account, profile, resumes, ATS analyses, interviews, jobs, and files. This cannot be undone. Continue?",
+    );
+    if (!ok) return;
+
+    setDeleting(true);
+    try {
+      await apiRequest("/account", {
+        method: "DELETE",
+        body: JSON.stringify({
+          confirmation: DELETE_ACCOUNT_PHRASE,
+          email: confirmEmail.trim() || accountEmail || null,
+        }),
+      });
+      await createClient()?.auth.signOut();
+      router.replace("/");
+      router.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const canDelete =
+    confirmPhrase.trim() === DELETE_ACCOUNT_PHRASE &&
+    (!accountEmail || confirmEmail.trim().toLowerCase() === accountEmail.toLowerCase());
+
   return (
     <Frame title="Account & access" description="Supabase Auth manages sign-in and password recovery.">
       <Card className="stack">
-        <Button variant="secondary" onClick={change}>
-          Send password recovery link
-        </Button>
-        <Button variant="secondary" onClick={logout}>
-          Logout
-        </Button>
-        <p>Account deletion requires explicit confirmation and the server-side Supabase secret to be configured.</p>
-        {error && <p className="field-error">{error}</p>}
+        <h2 style={{ margin: 0 }}>Session</h2>
+        {accountEmail ? (
+          <p style={{ margin: 0 }}>
+            Signed in as <strong>{accountEmail}</strong>
+          </p>
+        ) : null}
+        <div className="cluster">
+          <Button variant="secondary" onClick={change}>
+            Send password recovery link
+          </Button>
+          <Button variant="secondary" onClick={logout}>
+            Logout
+          </Button>
+        </div>
+        {message && (
+          <p role="status" style={{ margin: 0 }}>
+            {message}
+          </p>
+        )}
+        {error && !showDeletePanel && (
+          <p role="alert" className="field-error" style={{ margin: 0 }}>
+            {error}
+          </p>
+        )}
+      </Card>
+
+      <Card className="stack" style={{ borderColor: "color-mix(in srgb, var(--danger) 45%, var(--border))" }}>
+        <h2 style={{ margin: 0 }}>Delete account</h2>
+        <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
+          Permanently removes your auth account and all candidate data stored in Supabase: profile, skills, experience,
+          education, resumes and files, job descriptions, ATS analyses, interviews, learning paths, saved jobs,
+          activity, and preferences. This cannot be undone.
+        </p>
+        {!showDeletePanel ? (
+          <Button variant="danger" onClick={() => setShowDeletePanel(true)}>
+            I want to delete my account
+          </Button>
+        ) : (
+          <div className="stack">
+            <label className="field-label">
+              Confirm your account email
+              <Input
+                type="email"
+                autoComplete="email"
+                value={confirmEmail}
+                onChange={(e) => setConfirmEmail(e.target.value)}
+                placeholder={accountEmail || "you@example.com"}
+                disabled={deleting}
+              />
+            </label>
+            <label className="field-label">
+              Type <span className="mono">{DELETE_ACCOUNT_PHRASE}</span> to confirm
+              <Input
+                value={confirmPhrase}
+                onChange={(e) => setConfirmPhrase(e.target.value)}
+                placeholder={DELETE_ACCOUNT_PHRASE}
+                disabled={deleting}
+                autoComplete="off"
+              />
+            </label>
+            <div className="cluster">
+              <Button variant="danger" disabled={deleting || !canDelete} onClick={() => void deleteAccount()}>
+                {deleting ? "Deleting…" : "Permanently delete account"}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={deleting}
+                onClick={() => {
+                  setShowDeletePanel(false);
+                  setConfirmPhrase("");
+                  setConfirmEmail("");
+                  setError("");
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+            {error && (
+              <p role="alert" className="field-error" style={{ margin: 0 }}>
+                {error}
+              </p>
+            )}
+            <p className="muted" style={{ margin: 0, fontSize: "var(--text-xs)" }}>
+              Requires the API <code>SUPABASE_SECRET_KEY</code> so the server can delete the Auth user (DB rows cascade).
+            </p>
+          </div>
+        )}
       </Card>
     </Frame>
   );

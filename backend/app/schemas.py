@@ -19,6 +19,26 @@ class ProfilePatch(BaseModel):
     onboarding_completed: bool | None = None
 
 
+class ProfileFromResumePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resume_version_id: UUID | None = None
+
+
+class ProfileFromResumeApplyRequest(BaseModel):
+    """Apply a reviewed resume-derived draft to the candidate profile tables."""
+
+    model_config = ConfigDict(extra="forbid")
+    fill_empty_only: bool = True
+    profile: dict[str, Any] = Field(default_factory=dict)
+    skills: list[dict[str, Any]] = Field(default_factory=list, max_length=80)
+    experiences: list[dict[str, Any]] = Field(default_factory=list, max_length=40)
+    education: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    projects: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    certifications: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
+    languages: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    links: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+
+
 class PreferencesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_roles: list[str] = []
@@ -41,10 +61,18 @@ class PreferencesUpdate(BaseModel):
 
 
 class JobDescriptionTextCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    # Optional: when omitted, the API infers title/role/company from the JD text.
+    title: str | None = Field(default=None, max_length=200)
     company: str | None = Field(default=None, max_length=200)
     role_title: str | None = Field(default=None, max_length=200)
     raw_text: str = Field(min_length=20, max_length=200_000)
+
+
+class JobDescriptionMetadataPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, max_length=200)
+    company: str | None = Field(default=None, max_length=200)
+    role_title: str | None = Field(default=None, max_length=200)
 
 
 class ExtractionPatch(BaseModel):
@@ -107,6 +135,14 @@ class PrivacySettings(BaseModel):
     resume_processing_consent: bool = False
     job_recommendation_consent: bool = False
     profile_visibility: Literal["private", "limited"] = "private"
+
+
+class AccountDeleteRequest(BaseModel):
+    """Explicit confirmation required before irreversible account deletion."""
+
+    model_config = ConfigDict(extra="forbid")
+    confirmation: str = Field(min_length=1, max_length=80)
+    email: str | None = Field(default=None, max_length=320)
 
 
 class LinkInput(BaseModel):

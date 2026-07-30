@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { expect, test } from "@playwright/test";
 
@@ -87,46 +86,18 @@ test.describe("live Supabase persistence", () => {
     await expect(page.getByLabel("resume processing consent")).toBeChecked();
 
     await page.goto("/resume-analysis/new");
+    await page.getByLabel("Resume file").setInputFiles("tests/fixtures/sample-resume.docx");
     await page.getByLabel("Paste text").fill(
       "Evidence Engineer role requiring Python, SQL, accessibility, and secure data persistence.",
     );
-    await page.getByRole("button", { name: "Store job description" }).click();
-    await expect(page.getByRole("status")).toContainText("Job description stored");
-
-    const resumeId = randomUUID();
-    const versionId = randomUUID();
-    const insertedResume = await admin.from("resumes").insert({
-      id: resumeId,
-      user_id: userId,
-      title: "Browser audit resume",
-      is_active: false,
+    await expect(page.getByRole("button", { name: "Proceed" })).toBeEnabled();
+    await page.getByRole("button", { name: "Proceed" }).click();
+    await expect(page.getByRole("heading", { name: "Confirm extracted resume and JD" })).toBeVisible({
+      timeout: 60000,
     });
-    expect(insertedResume.error).toBeNull();
-    const insertedVersion = await admin.from("resume_versions").insert({
-      id: versionId,
-      resume_id: resumeId,
-      user_id: userId,
-      version_number: 1,
-      source_type: "uploaded",
-      original_filename: "audit.docx",
-      storage_path: `${userId}/audit/source.docx`,
-      mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      size_bytes: 1,
-      sha256: "0".repeat(64),
-      plain_text: "Backend engineer\nSkills\nPython, FastAPI",
-      structured_content: {
-        sections: { summary: ["Backend engineer"], skills: ["Python, FastAPI"] },
-        unclassified_blocks: ["Audit Candidate"],
-      },
-      extraction_status: "review_required",
-    });
-    expect(insertedVersion.error).toBeNull();
-
-    await page.reload();
-    await expect(page.getByRole("heading", { name: "Confirm the evidence used for scoring" })).toBeVisible();
     await page.getByLabel(/I reviewed the extracted resume and job description/i).check();
     await page.getByRole("button", { name: "Confirm inputs and calculate ATS score" }).click();
-    await expect(page).toHaveURL(/\/resume-analysis\/report\/[0-9a-f-]+$/);
+    await expect(page).toHaveURL(/\/resume-analysis\/report\/[0-9a-f-]+$/, { timeout: 60000 });
     await expect(page.getByText("JD keyword coverage")).toBeVisible();
     await expect(page.getByRole("heading", { name: /\/100$/ })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Matched evidence" })).toBeVisible();
