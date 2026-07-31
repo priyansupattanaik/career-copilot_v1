@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
-import { MailCheck } from "lucide-react";
+import { Eye, MailCheck } from "lucide-react";
 import { Button, Input } from "@/components/ui/primitives";
 import { createClient } from "@/lib/supabase/client";
 
@@ -40,12 +40,14 @@ export function SignInScreen() {
     search.get("error") === "configuration_required" ? configurationError() : "",
   );
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const supabase = createClient();
     if (!supabase) return setError(configurationError());
     setBusy(true);
     setError("");
+    setShowPassword(false);
     const result = await supabase.auth.signInWithPassword({ email, password });
     setBusy(false);
     if (result.error) return setError(result.error.message);
@@ -74,14 +76,33 @@ export function SignInScreen() {
         </label>
         <label className="field-label">
           Password
-          <Input
-            type="password"
-            autoComplete="current-password"
-            required
-            minLength={8}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+          <div className="password-field">
+            <Input
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              required
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <button
+              type="button"
+              className="password-reveal"
+              aria-label="Hold to show password"
+              title="Hold to show password"
+              tabIndex={-1}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                setShowPassword(true);
+              }}
+              onPointerUp={() => setShowPassword(false)}
+              onPointerLeave={() => setShowPassword(false)}
+              onPointerCancel={() => setShowPassword(false)}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <Eye size={18} aria-hidden />
+            </button>
+          </div>
         </label>
         {error && (
           <p role="alert" className="field-error">

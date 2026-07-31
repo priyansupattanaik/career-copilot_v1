@@ -2,7 +2,7 @@
 
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
 const pins: [number, number, string][] = [[13, 77, "Bengaluru"], [1, 104, "Singapore"], [52, 13, "Berlin"], [51, 0, "London"], [44, -79, "Toronto"], [38, -122, "San Francisco"], [-24, -47, "São Paulo"]];
@@ -10,13 +10,32 @@ function point(lat: number, lon: number, radius = 2.05) { const phi = (90 - lat)
 
 function GlobeMesh() {
   const group = useRef<THREE.Group>(null);
+  const [colors, setColors] = useState({ fill: "#72c8ff", wire: "#123f5e", pin: "#f1c94a", halo: "#ccecff" });
+
+  useEffect(() => {
+    const readColors = () => {
+      const styles = getComputedStyle(document.documentElement);
+      setColors({
+        fill: styles.getPropertyValue("--globe-fill").trim(),
+        wire: styles.getPropertyValue("--globe-wire").trim(),
+        pin: styles.getPropertyValue("--globe-pin").trim(),
+        halo: styles.getPropertyValue("--globe-halo").trim(),
+      });
+    };
+    const observer = new MutationObserver(readColors);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    readColors();
+    return () => observer.disconnect();
+  }, []);
+
   const reduced = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   useFrame((_, delta) => { if (group.current && !reduced) group.current.rotation.y += delta * .07; });
+
   return <group ref={group} rotation={[.18, -.5, 0]}>
-    <mesh><sphereGeometry args={[2, 48, 48]} /><meshStandardMaterial color="#72c8ff" roughness={.76} metalness={.08} /></mesh>
-    <mesh><sphereGeometry args={[2.015, 20, 20]} /><meshBasicMaterial color="#123f5e" wireframe transparent opacity={.25} /></mesh>
-    {pins.map(([lat, lon, label]) => { const p = point(lat, lon); return <group key={label} position={p}><mesh><sphereGeometry args={[.075, 12, 12]} /><meshStandardMaterial color="#ffd166" emissive="#ffd166" emissiveIntensity={.25} /></mesh></group>; })}
-    <mesh><sphereGeometry args={[2.12, 48, 48]} /><meshBasicMaterial color="#ccecff" transparent opacity={.09} side={THREE.BackSide} /></mesh>
+    <mesh><sphereGeometry args={[2, 48, 48]} /><meshStandardMaterial color={colors.fill} roughness={.76} metalness={.08} /></mesh>
+    <mesh><sphereGeometry args={[2.015, 20, 20]} /><meshBasicMaterial color={colors.wire} wireframe transparent opacity={.25} /></mesh>
+    {pins.map(([lat, lon, label]) => { const p = point(lat, lon); return <group key={label} position={p}><mesh><sphereGeometry args={[.075, 12, 12]} /><meshStandardMaterial color={colors.pin} emissive={colors.pin} emissiveIntensity={.25} /></mesh></group>; })}
+    <mesh><sphereGeometry args={[2.12, 48, 48]} /><meshBasicMaterial color={colors.halo} transparent opacity={.09} side={THREE.BackSide} /></mesh>
   </group>;
 }
 

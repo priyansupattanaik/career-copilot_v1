@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { BookOpenCheck, BriefcaseBusiness, FileSearch, Menu, ShieldCheck, Sparkles, X } from "lucide-react";
 import { ButtonLink } from "@/components/ui/primitives";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 const CareerGlobe = dynamic(() => import("./career-globe"), {
   ssr: false,
@@ -34,6 +35,7 @@ export function LandingPage() {
             <a href="#modules">Features</a>
             <Link href="/sign-in">Sign in</Link>
             <ButtonLink href="/sign-up">Get started</ButtonLink>
+            <ThemeToggle />
           </div>
           <button className="icon-button mobile-menu-button" onClick={() => setOpen(!open)} aria-label="Toggle navigation">
             {open ? <X /> : <Menu />}
@@ -45,6 +47,9 @@ export function LandingPage() {
           <a href="#journey">How it works</a>
           <Link href="/sign-in">Sign in</Link>
           <ButtonLink href="/sign-up">Get started</ButtonLink>
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: '10px' }}>
+            <ThemeToggle />
+          </div>
         </div>
       )}
       <main id="main-content">

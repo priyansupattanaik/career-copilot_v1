@@ -8,6 +8,7 @@ import { Bell, BookOpenCheck, BriefcaseBusiness, FileSearch, Gauge, Menu, Mic2, 
 import { routes } from "@/lib/routes";
 import { createClient } from "@/lib/supabase/client";
 import { apiRequest } from "@/lib/api/client";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 const navigation = [{ href: routes.dashboard, label: "Dashboard", icon: Gauge },{ href: routes.resume, label: "Resume Analysis", icon: FileSearch },{ href: routes.interview, label: "Mock Interview", icon: Mic2 },{ href: routes.learning, label: "Learning Path", icon: BookOpenCheck },{ href: routes.jobs, label: "Recommended Jobs", icon: BriefcaseBusiness },{ href: routes.settings, label: "Settings", icon: Settings }];
 type Bootstrap = {
@@ -102,6 +103,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           <strong className="app-header-title">Career Copilot</strong>
           <div className="app-header-actions">
             <span className="badge badge-success">Signed in</span>
+            <ThemeToggle />
             <button className="icon-button" aria-label={`${bootstrap?.unread_notification_count || 0} unread notifications`}>
               <Bell />
             </button>
