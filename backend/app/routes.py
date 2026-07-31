@@ -37,6 +37,7 @@ from app.documents import (
 )
 from app.errors import ApiError
 from app.profile_import import insert_validated_batch
+from app.agents.profile_fill.normalize import normalize_date_value
 from app.repository import (
     CANDIDATE_TABLES,
     client_for,
@@ -411,6 +412,17 @@ def _prepare_candidate_payload(
     elif resource == "experiences" and require_core:
         if not str(data.get("company_name") or "").strip() or not str(data.get("role_title") or "").strip():
             raise ApiError(400, "invalid_experience", "Company name and role title are required.")
+    if resource == "experiences":
+        for key in ("start_date", "end_date"):
+            if key in data and data[key] not in (None, ""):
+                normalized = normalize_date_value(data[key])
+                if normalized is None:
+                    raise ApiError(400, "invalid_experience_date", "Experience dates must use YYYY-MM-DD format.")
+                data[key] = normalized
+        if data.get("is_current"):
+            data["end_date"] = None
+        if data.get("start_date") and data.get("end_date") and data["end_date"] < data["start_date"]:
+            raise ApiError(400, "invalid_experience_date", "Experience end date cannot be before start date.")
     elif resource == "education" and require_core:
         if not str(data.get("institution") or "").strip():
             raise ApiError(400, "invalid_education", "Institution is required.")
@@ -919,6 +931,8 @@ def apply_profile_from_resume(
                 "employment_type": (
                     str(row["employment_type"]).strip()[:80] if row.get("employment_type") else None
                 ),
+                "start_date": normalize_date_value(row.get("start_date")),
+                "end_date": None if row.get("is_current") else normalize_date_value(row.get("end_date")),
                 "summary": (str(row["summary"]).strip()[:4000] if row.get("summary") else None),
                 "is_current": bool(row.get("is_current")),
                 "display_order": int(row.get("display_order") or index),

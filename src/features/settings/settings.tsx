@@ -193,6 +193,19 @@ const LINK_TYPE_OPTIONS = [
 
 type ProfileRecord = Record<string, any>;
 
+function experienceDateLabel(row: ProfileRecord): string {
+  if (!row.start_date && !row.end_date && !row.is_current) return "";
+  const display = (value: unknown) => {
+    const text = String(value || "");
+    if (!/^\d{4}-\d{2}/.test(text)) return text;
+    const [year, month] = text.split("-");
+    return new Intl.DateTimeFormat("en", { month: "short", year: "numeric" }).format(
+      new Date(Number(year), Number(month) - 1, 1),
+    );
+  };
+  return `${display(row.start_date) || "Unknown start"} – ${row.is_current ? "Present" : display(row.end_date) || "Unknown end"}`;
+}
+
 type PrefDraft = {
   target_roles: string[];
   preferred_industries: string[];
@@ -558,6 +571,9 @@ export function ProfileSettings() {
     role_title: "",
     location: "",
     employment_type: "",
+    start_date: "",
+    end_date: "",
+    is_current: false,
     summary: "",
   });
   const [educationDraft, setEducationDraft] = useState({ institution: "", degree: "", field_of_study: "" });
@@ -942,10 +958,13 @@ export function ProfileSettings() {
           role_title: experienceDraft.role_title.trim(),
           location: experienceDraft.location.trim() || null,
           employment_type: experienceDraft.employment_type || null,
+          start_date: experienceDraft.start_date || null,
+          end_date: experienceDraft.is_current ? null : experienceDraft.end_date || null,
+          is_current: experienceDraft.is_current,
           summary: experienceDraft.summary.trim() || null,
         }),
       });
-      setExperienceDraft({ company_name: "", role_title: "", location: "", employment_type: "", summary: "" });
+      setExperienceDraft({ company_name: "", role_title: "", location: "", employment_type: "", start_date: "", end_date: "", is_current: false, summary: "" });
       await loadAll();
       setMessage("Experience saved to your account.");
     } catch (e) {
@@ -1131,7 +1150,10 @@ export function ProfileSettings() {
                     [
                       "experiences",
                       "Experience",
-                      (row: ProfileRecord) => `${row.role_title || "Role"} · ${row.company_name || ""}`,
+                      (row: ProfileRecord) =>
+                        [row.role_title || "Role", row.company_name || "", experienceDateLabel(row)]
+                          .filter(Boolean)
+                          .join(" · "),
                     ],
                     [
                       "education",
@@ -1497,6 +1519,31 @@ export function ProfileSettings() {
                 otherPlaceholder="Enter employment type"
               />
               <label className="field-label">
+                Start date
+                <Input
+                  type="date"
+                  value={experienceDraft.start_date}
+                  onChange={(e) => setExperienceDraft({ ...experienceDraft, start_date: e.target.value })}
+                />
+              </label>
+              <label className="field-label">
+                End date
+                <Input
+                  type="date"
+                  value={experienceDraft.end_date}
+                  disabled={experienceDraft.is_current}
+                  onChange={(e) => setExperienceDraft({ ...experienceDraft, end_date: e.target.value })}
+                />
+              </label>
+              <label className="row" style={{ justifyContent: "flex-start", gap: 8, alignSelf: "end", minHeight: 44 }}>
+                <input
+                  type="checkbox"
+                  checked={experienceDraft.is_current}
+                  onChange={(e) => setExperienceDraft({ ...experienceDraft, is_current: e.target.checked, end_date: e.target.checked ? "" : experienceDraft.end_date })}
+                />
+                <span>Currently working here</span>
+              </label>
+              <label className="field-label">
                 Summary
                 <Input
                   value={experienceDraft.summary}
@@ -1522,8 +1569,9 @@ export function ProfileSettings() {
                       {item.role_title} · {item.company_name}
                     </strong>
                     <p style={{ margin: 0 }}>
-                      {[item.employment_type, item.location, item.summary].filter(Boolean).join(" · ") ||
-                        "Saved experience"}
+                      {[experienceDateLabel(item), item.employment_type, item.location, item.summary]
+                        .filter(Boolean)
+                        .join(" · ") || "Saved experience"}
                     </p>
                   </div>
                   <Button variant="secondary" onClick={() => removeRecord("experiences", item.id, "Experience")}>
