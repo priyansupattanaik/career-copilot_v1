@@ -97,11 +97,14 @@ def signed_avatar_url(client, settings: Settings, avatar_path: str | None) -> st
 
 
 def attach_avatar_url(profile: dict[str, Any] | None, client, settings: Settings) -> dict[str, Any] | None:
-    """Return a shallow copy of profile with avatar_url when a path exists."""
+    """Return a profile copy without exposing references to missing avatar files."""
     if not profile:
         return profile
     enriched = dict(profile)
-    enriched["avatar_url"] = signed_avatar_url(client, settings, profile.get("avatar_path"))
+    avatar_url = signed_avatar_url(client, settings, profile.get("avatar_path"))
+    enriched["avatar_url"] = avatar_url
+    if profile.get("avatar_path") and not avatar_url:
+        enriched["avatar_path"] = None
     return enriched
 
 

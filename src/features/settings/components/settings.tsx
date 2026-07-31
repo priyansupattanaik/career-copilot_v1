@@ -1392,7 +1392,15 @@ export function ProfileSettings() {
               <div className="profile-avatar-preview" aria-hidden={!form.avatar_url}>
                 {form.avatar_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={form.avatar_url} alt="" width={88} height={88} />
+                  <img
+                    src={form.avatar_url}
+                    alt=""
+                    width={88}
+                    height={88}
+                    onError={() =>
+                      setForm((current) => ({ ...current, avatar_path: null, avatar_url: null }))
+                    }
+                  />
                 ) : (
                   <span className="profile-avatar-fallback">
                     {(form.full_name || "U")

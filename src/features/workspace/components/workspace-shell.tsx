@@ -72,6 +72,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null);
   const demoMode = useSyncExternalStore(subscribeDemoMode, readDemoMode, () => false);
   // Live score from last profile mutation (server payload) until bootstrap catches up.
   const [liveCompletion, setLiveCompletion] = useState<{
@@ -188,7 +189,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
-  const avatarUrl = bootstrap?.profile?.avatar_url || null;
+  const profileAvatarUrl = bootstrap?.profile?.avatar_url || null;
+  const avatarUrl = profileAvatarUrl && profileAvatarUrl !== failedAvatarUrl ? profileAvatarUrl : null;
   const fromBootstrap = completionFromBootstrap(bootstrap);
   const completion = liveCompletion?.completion ?? fromBootstrap.completion;
   const missing: ProfileMissingItem[] = liveCompletion?.missing ?? fromBootstrap.missing;
@@ -259,7 +261,12 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               >
                 {avatarUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <img src={avatarUrl} alt="" className="avatar-image" />
+                  <img
+                    src={avatarUrl}
+                    alt=""
+                    className="avatar-image"
+                    onError={() => setFailedAvatarUrl(avatarUrl)}
+                  />
                 ) : (
                   initials
                 )}

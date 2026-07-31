@@ -103,6 +103,9 @@ class LocalStorageObject:
                 for entry in base.iterdir()]
 
     def create_signed_url(self, path: str, _expires: int) -> dict[str, str]:
+        target = self._path(path)
+        if not target.is_file():
+            raise FileNotFoundError(path)
         # Browser-rendered files are served through the Next.js same-origin
         # proxy, which forwards the candidate's Bearer token to FastAPI.
         return {"signedURL": f"/api/files/{quote(self.bucket)}/{quote(path, safe='/')}"}
