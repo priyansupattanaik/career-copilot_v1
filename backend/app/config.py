@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     interview_bucket: str = "interview-media"
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    nvidia_model: str = ""
+    nvidia_model: str = "deepseek-3.2"
     nvidia_timeout_seconds: float = Field(default=90, gt=0, le=180)
     nvidia_max_retries: int = Field(default=2, ge=0, le=2)
     nvidia_max_output_tokens: int = Field(default=4096, ge=256, le=8192)
@@ -42,11 +42,12 @@ class Settings(BaseSettings):
     # Groq — separate provider for interview questions (not an NVIDIA fallback).
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "llama-3.3-70b-versatile"
     groq_timeout_seconds: float = Field(default=45, gt=0, le=180)
     groq_max_retries: int = Field(default=2, ge=0, le=2)
     groq_max_output_tokens: int = Field(default=2048, ge=256, le=8192)
     groq_temperature: float = Field(default=0.4, ge=0, le=1)
+    llm_provider: str = "groq"
     improvement_max_sections: int = Field(default=4, ge=1, le=8)
     improvement_max_source_chars: int = Field(default=30_000, ge=1_000, le=100_000)
     improvement_max_jd_chars: int = Field(default=12_000, ge=1_000, le=50_000)

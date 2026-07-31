@@ -5,6 +5,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadRootEnv } from "./load-env.mjs";
+
+loadRootEnv();
 
 const isWin = process.platform === "win32";
 const venvDir = "backend/.venv";

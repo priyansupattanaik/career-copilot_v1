@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { loadRootEnv } from "./load-env.mjs";
+
+loadRootEnv();
 
 const backendPython = process.platform === "win32" ? "backend/.venv/Scripts/python.exe" : "backend/.venv/bin/python";
 if (!existsSync(backendPython)) {
@@ -9,8 +12,8 @@ if (!existsSync(backendPython)) {
 
 const child = spawn(
   backendPython,
-  ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000", "--app-dir", "backend"],
-  { stdio: "inherit" },
+  ["-m", "uvicorn", "app.main:app", "--reload", "--reload-dir", "backend", "--port", "8000", "--app-dir", "backend"],
+  { stdio: "inherit", env: process.env },
 );
 
 let stopping = false;

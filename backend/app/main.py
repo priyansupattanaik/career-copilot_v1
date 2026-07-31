@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.errors import ApiError, api_error_handler, unexpected_error_handler
+from app.ats_scoring.router import router as ats_scoring_router
 from app.routes import router
 
 settings = get_settings()
@@ -54,3 +55,4 @@ async def request_context(request: Request, call_next):
 
 
 app.include_router(router, prefix=settings.api_v1_prefix)
+app.include_router(ats_scoring_router, prefix=settings.api_v1_prefix)

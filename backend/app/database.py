@@ -102,7 +102,9 @@ class LocalStorageObject:
                 for entry in base.iterdir()]
 
     def create_signed_url(self, path: str, _expires: int) -> dict[str, str]:
-        return {"signedURL": f"{self.settings.public_api_base_url.rstrip('/')}/api/v1/files/{quote(self.bucket)}/{quote(path, safe='/')}"}
+        # Browser-rendered files are served through the Next.js same-origin
+        # proxy, which forwards the candidate's Bearer token to FastAPI.
+        return {"signedURL": f"/api/files/{quote(self.bucket)}/{quote(path, safe='/')}"}
 
 
 class LocalStorage:

@@ -1,21 +1,15 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import process from "node:process";
+import { loadRootEnv } from "./load-env.mjs";
 
-const environmentPath = resolve(process.cwd(), ".env");
-const environment = Object.fromEntries(
-  readFileSync(environmentPath, "utf8")
-    .split(/\r?\n/)
-    .filter((line) => /^\s*[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line))
-    .map((line) => {
-      const separator = line.indexOf("=");
-      return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
-    }),
-);
+loadRootEnv();
+const environment = process.env;
 
 const checks = [
   ["NEXT_PUBLIC_API_BASE_URL", "CLIENT-SAFE"],
   ["DATABASE_PATH", "SERVER-ONLY"],
   ["AUTH_SECRET", "SERVER-ONLY"],
+  ["PUBLIC_API_BASE_URL", "SERVER-ONLY-OPTIONAL"],
+  ["LLM_PROVIDER", "SERVER-ONLY"],
   ["NVIDIA_API_KEY", "SERVER-ONLY"],
   ["NVIDIA_BASE_URL", "SERVER-ONLY"],
   ["NVIDIA_MODEL", "SERVER-ONLY"],

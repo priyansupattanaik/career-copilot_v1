@@ -1,6 +1,7 @@
 import uuid
 import hashlib
 import hmac
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,7 +22,9 @@ from app.agents.ats import generate_ats_improvement_brief
 from app.agents.interview import generate_interview_questions
 from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
 from app.agents.registry import agents_status
-from app.ats import ALGORITHM_VERSION, score_resume
+from app.ats import score_resume
+from app.ats_scoring.schemas import ScoreResult
+from app.ats_scoring.service import score_resume_jd
 from app.auth import CurrentUser, create_access_token, get_current_user
 from app.avatars import (
     attach_avatar_url,
@@ -74,6 +77,8 @@ from app.database import database_client, database_probe
 
 router = APIRouter()
 router.include_router(resume_improvement_router)
+logger = logging.getLogger(__name__)
+SCORING_ALGORITHM_VERSION = "structured-llm-gated-v1"
 
 
 def _password_hash(password: str, salt: bytes | None = None) -> str:
@@ -1929,7 +1934,7 @@ async def create_ats(
         .eq("user_id", str(user.id))
         .eq("resume_version_id", str(payload.resume_version_id))
         .eq("job_description_id", str(payload.job_description_id))
-        .eq("algorithm_version", ALGORITHM_VERSION)
+        .eq("algorithm_version", SCORING_ALGORITHM_VERSION)
         .eq("status", "completed")
         .order("created_at", desc=True)
         .limit(1)
@@ -1945,6 +1950,38 @@ async def create_ats(
     except ValueError as exc:
         raise ApiError(422, "ats_input_insufficient", str(exc)) from exc
 
+    structured_score: ScoreResult | None = None
+    try:
+        structured_score = await score_resume_jd(
+            version.get("plain_text") or "",
+            job.get("raw_text") or "",
+        )
+    except ApiError as exc:
+        logger.warning("ats_structured_pipeline_fallback code=%s", exc.code)
+    except Exception:
+        logger.exception("ats_structured_pipeline_fallback_unexpected")
+
+    gate_rejected = bool(structured_score and structured_score.gate.decision == "REJECT")
+    scoring_method = (
+        "Structured LLM scoring with deterministic keyword evidence"
+        if structured_score
+        else "Deterministic keyword coverage fallback"
+    )
+    persisted_score = (
+        0
+        if gate_rejected
+        else structured_score.composite_score
+        if structured_score
+        else score.overall_score
+    )
+    score_breakdown = {
+        **score.breakdown,
+        "method": scoring_method,
+        "structured_parameter_scores": structured_score.parameter_scores if structured_score else None,
+        "structured_reasons": structured_score.reasons if structured_score else None,
+        "domain_gate": structured_score.gate.model_dump() if structured_score else None,
+    }
+
     analysis = (
         client.table("ats_analyses")
         .insert(
@@ -1953,7 +1990,7 @@ async def create_ats(
                 "resume_version_id": str(payload.resume_version_id),
                 "job_description_id": str(payload.job_description_id),
                 "status": "processing",
-                "algorithm_version": ALGORITHM_VERSION,
+                "algorithm_version": SCORING_ALGORITHM_VERSION,
                 "started_at": utc_now(),
             }
         )
@@ -1969,14 +2006,14 @@ async def create_ats(
                 "category": "keyword_coverage",
                 "requirement_text": item.requirement,
                 "requirement_type": "keyword",
-                "resume_evidence_text": item.resume_evidence if item.matched else None,
+                "resume_evidence_text": None if gate_rejected else item.resume_evidence if item.matched else None,
                 "resume_section": item.resume_section,
                 "resume_source_reference": {"resume_version_id": str(payload.resume_version_id)},
                 "job_description_source_reference": {"job_description_id": str(payload.job_description_id)},
-                "match_status": "strong_match" if item.matched else "not_found",
-                "score_contribution": item.score_contribution,
+                "match_status": "not_found" if gate_rejected else "strong_match" if item.matched else "not_found",
+                "score_contribution": 0 if gate_rejected else item.score_contribution,
                 "rule_id": "exact_normalized_keyword",
-                "explanation": "",
+                "explanation": structured_score.gate.reason if gate_rejected and structured_score else "",
             }
             for item in score.evidence
         ]
@@ -1985,9 +2022,9 @@ async def create_ats(
 
         brief = await generate_ats_improvement_brief(
             settings,
-            overall_score=score.overall_score,
-            missing_terms=score.missing_terms,
-            matched_count=len(score.matched_terms),
+            overall_score=persisted_score,
+            missing_terms=[item.requirement for item in score.evidence] if gate_rejected else score.missing_terms,
+            matched_count=0 if gate_rejected else len(score.matched_terms),
             total_terms=len(score.evidence),
             role_title=job.get("role_title") or job.get("title"),
             company=job.get("company"),
@@ -1998,20 +2035,23 @@ async def create_ats(
             .update(
                 {
                     "status": "completed",
-                    "overall_score": score.overall_score,
-                    "score_breakdown": score.breakdown,
+                    "overall_score": persisted_score,
+                    "score_breakdown": score_breakdown,
                     "summary": {
-                        "method": "Deterministic normalized keyword coverage",
-                        "matched": len(score.matched_terms),
-                        "missing": len(score.missing_terms),
+                        "method": scoring_method,
+                        "matched": 0 if gate_rejected else len(score.matched_terms),
+                        "missing": len(score.evidence) if gate_rejected else len(score.missing_terms),
                         "total": len(score.evidence),
-                        "missing_terms": score.missing_terms,
+                        "missing_terms": [item.requirement for item in score.evidence] if gate_rejected else score.missing_terms,
+                        "structured_composite_score": structured_score.composite_score if structured_score else None,
+                        "structured_parameter_scores": structured_score.parameter_scores if structured_score else None,
+                        "domain_gate": structured_score.gate.model_dump() if structured_score else None,
                         "overall_inference": brief.get("overall_inference"),
                         "focus_areas": brief.get("focus_areas") or [],
                         "inference_provider": brief.get("provider"),
                         "inference_model": brief.get("model"),
                         "disclaimer": (
-                            "Keyword coverage is not a hiring prediction. "
+                            "ATS scoring is an evidence-based decision aid, not a hiring prediction. "
                             "Do not add false experience."
                         ),
                     },

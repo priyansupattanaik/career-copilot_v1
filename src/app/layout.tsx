@@ -10,7 +10,7 @@ export const metadata: Metadata = { title: { default: "Career Copilot", template
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
       <head>
         <ThemeScript />
       </head>

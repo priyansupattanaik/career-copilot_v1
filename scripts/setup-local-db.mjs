@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { loadRootEnv } from "./load-env.mjs";
+
+loadRootEnv();
 
 const python = process.platform === "win32" ? "backend/.venv/Scripts/python.exe" : "backend/.venv/bin/python";
 if (!existsSync(python)) {

@@ -14,10 +14,14 @@ function saveToken(value: string) {
   document.cookie = `career_copilot_session=${encodeURIComponent(value)}; Path=/; SameSite=Lax`;
 }
 async function request(path: string, body?: unknown) {
+  const accessToken = token();
   const response = await fetch(`${base()}/api/v1${path}`, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({}));

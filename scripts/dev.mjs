@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { loadRootEnv } from "./load-env.mjs";
+
+loadRootEnv();
 
 const backendPython = process.platform === "win32" ? "backend/.venv/Scripts/python.exe" : "backend/.venv/bin/python";
 if (!existsSync(backendPython)) {
@@ -11,7 +14,7 @@ const commands = [
   {
     name: "backend",
     command: backendPython,
-    args: ["-m", "uvicorn", "app.main:app", "--reload", "--port", "8000", "--app-dir", "backend"],
+    args: ["-m", "uvicorn", "app.main:app", "--reload", "--reload-dir", "backend", "--port", "8000", "--app-dir", "backend"],
   },
   {
     name: "frontend",
@@ -38,7 +41,7 @@ function terminate(child) {
 function start(service) {
   if (stopping) return;
 
-  const child = spawn(service.command, service.args, { stdio: "inherit" });
+  const child = spawn(service.command, service.args, { stdio: "inherit", env: process.env });
   children.set(service.name, child);
   child.on("error", (error) => {
     console.error(`[dev] ${service.name} failed to start: ${error.message}`);

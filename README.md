@@ -99,7 +99,7 @@ Think of three layers:
 | **Profile completion toast** | Corner reminder listing **only what is still missing**, with accurate % from the server. |
 | **Resume library** | Upload PDF/DOCX, review extracted sections, confirm, preview PDF **in a modal**, set active resume. |
 | **Job descriptions** | Paste text or upload a JD file, review, confirm. |
-| **ATS analysis** | Score how many JD keywords appear in your resume; list missing keywords; short improvement note. |
+| **ATS analysis** | Parse the confirmed resume and JD, run a domain gate, calculate a weighted composite score, retain deterministic keyword evidence, and show missing terms plus an improvement note. |
 | **Resume edit after ATS** | Edit the **same** resume (not a fake empty copy). Add missing keywords only if you confirm. Optional AI rewrites. Export PDF/DOCX. Re-score. |
 | **Mock interview** | Create a session, get questions, answer, finish or delete. |
 | **Learning & jobs** | Browse/save from data stored in the database (not invented in the browser). |
@@ -408,23 +408,29 @@ Same idea: paste or upload → extract → review → confirm. ATS needs a confi
 
 ### What it is
 
-A **keyword coverage percentage**:
+A **structured ATS composite score** backed by deterministic keyword evidence.
 
-> Of the important words taken from the job description, how many appear in your resume text?
+The product parses the confirmed resume and JD into structured JSON, applies a domain gate, and scores only allowed candidates. It is not a hiring prediction.
 
 It is **not** a prediction of whether you will get hired, and it does **not** use embeddings or “semantic fit.”
 
 ### Algorithm name
 
-`deterministic-keyword-coverage-v1` in `backend/app/ats.py`.
+The integrated path is `structured-llm-gated-v1` in `backend/app/ats_scoring/`. The deterministic evidence engine remains in `backend/app/ats.py` as the evidence layer and safe fallback.
 
-### Formula (simple)
+### Structured scoring formula
 
 ```text
-overall_score = round( matched_keywords / total_scored_keywords * 100 , 2 )
+composite = 0.40*hard_skill_match
+          + 0.25*experience_relevance
+          + 0.15*education_match
+          + 0.10*certifications_match
+          + 0.10*seniority_alignment
 ```
 
-Each keyword contributes equally.
+Each parameter is scored from 0 to 100. A rejected domain gate always produces a composite score of 0.
+
+The direct endpoint is `POST /api/v1/ats/score`. The normal product flow uses the existing `POST /api/v1/ats-analyses` route, so reports, evidence, and ownership checks remain unchanged.
 
 ### How keywords are chosen from the JD
 
@@ -440,7 +446,7 @@ A JD keyword counts as matched only if that **exact normalized token** appears i
 
 ### What the report shows
 
-- Overall score.
+- Structured parameter scores and the composite score when the provider pipeline succeeds.
 - Missing keywords (actionable).
 - An “overall inference” paragraph (AI if available, otherwise a plain rule-based note about missing terms).
 - It does **not** invent fake “evidence snippets” of things that are not in your resume.

@@ -41,7 +41,14 @@ type Analysis = {
   id: string;
   status: string;
   overall_score: number | null;
-  score_breakdown?: { matched_terms?: string[]; missing_terms?: string[]; total_terms?: number };
+  score_breakdown?: {
+    matched_terms?: string[];
+    missing_terms?: string[];
+    total_terms?: number;
+    method?: string;
+    structured_parameter_scores?: Record<string, number> | null;
+    domain_gate?: { decision?: "ALLOW" | "REJECT"; reason?: string } | null;
+  };
   summary?: {
     method?: string;
     disclaimer?: string;
@@ -52,6 +59,9 @@ type Analysis = {
     overall_inference?: string;
     focus_areas?: string[];
     inference_provider?: string;
+    structured_composite_score?: number | null;
+    structured_parameter_scores?: Record<string, number> | null;
+    domain_gate?: { decision?: "ALLOW" | "REJECT"; reason?: string } | null;
   };
   created_at: string;
   resume_version_id?: string;
@@ -959,13 +969,21 @@ export function AtsReport() {
   const matchedCount = analysis.summary?.matched ?? Math.max(0, total - missingTerms.length);
   const overallInference = analysis.summary?.overall_inference || "";
   const focusAreas = analysis.summary?.focus_areas || [];
+  const structuredScores =
+    analysis.summary?.structured_parameter_scores || analysis.score_breakdown?.structured_parameter_scores || null;
+  const domainGate = analysis.summary?.domain_gate || analysis.score_breakdown?.domain_gate || null;
+  const structuredScoring = Boolean(structuredScores || analysis.summary?.structured_composite_score != null);
 
   return (
     <div className="stack">
       <PageHeader
-        eyebrow="ATS keyword coverage"
+        eyebrow={structuredScoring ? "Structured ATS scoring" : "ATS keyword coverage"}
         title={`${analysis.overall_score ?? 0}/100`}
-        description="Exact keyword coverage vs the job description. Missing terms and an overall improvement brief only."
+        description={
+          structuredScoring
+            ? "Structured ATS composite score with parameter-level scoring and deterministic keyword evidence."
+            : "Exact keyword coverage vs the job description with deterministic evidence."
+        }
         action={
           <div className="cluster">
             <Link className="button button-primary" href={`/resume-analysis/report/${params.reportId}/edit`}>
@@ -996,13 +1014,31 @@ export function AtsReport() {
         </div>
       </Card>
       <Card className="stack panel-blue">
-        <Progress value={analysis.overall_score || 0} label="JD keyword coverage" />
+        <Progress value={analysis.overall_score || 0} label={structuredScoring ? "ATS composite score" : "JD keyword coverage"} />
         <p>
           <strong>{missingTerms.length}</strong> missing of <strong>{total || "—"}</strong> scored terms
           {matchedCount != null ? ` (${matchedCount} matched)` : ""}.
         </p>
         <p>{analysis.summary?.disclaimer || "Keyword coverage is not a hiring prediction."}</p>
+        {domainGate?.decision === "REJECT" ? (
+          <p className="field-error" role="alert">
+            Domain gate rejected this comparison: {domainGate.reason || "The resume is out of domain for this job."}
+          </p>
+        ) : null}
       </Card>
+      {structuredScores ? (
+        <Card className="stack">
+          <h2 style={{ margin: 0 }}>Structured score breakdown</h2>
+          <div className="grid-2">
+            {Object.entries(structuredScores).map(([key, value]) => (
+              <div key={key} className="panel-blue" style={{ padding: 14 }}>
+                <strong>{key.replaceAll("_", " ")}</strong>
+                <p style={{ margin: "6px 0 0", fontSize: "var(--text-xl)" }}>{Math.round(value)}/100</p>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
       <Card className="stack">
         <h2 style={{ margin: 0 }}>Missing keywords</h2>
         {missingTerms.length ? (
