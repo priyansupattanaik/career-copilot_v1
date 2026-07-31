@@ -1,9 +1,14 @@
 import uuid
+import hashlib
+import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, File, Form, Header, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, Header, Response, UploadFile
+from fastapi.responses import FileResponse
+from pathlib import Path
 
 from app.account_deletion import (
     CONFIRM_PHRASE,
@@ -17,7 +22,7 @@ from app.agents.interview import generate_interview_questions
 from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
 from app.agents.registry import agents_status
 from app.ats import ALGORITHM_VERSION, score_resume
-from app.auth import CurrentUser, get_current_user
+from app.auth import CurrentUser, create_access_token, get_current_user
 from app.avatars import (
     attach_avatar_url,
     avatar_extension_for_mime,
@@ -65,14 +70,110 @@ from app.schemas import (
     ProfilePatch,
     SavedJobPatch,
 )
-from app.supabase_clients import create_admin_supabase_client
+from app.database import database_client, database_probe
 
 router = APIRouter()
 router.include_router(resume_improvement_router)
 
 
+def _password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def _password_matches(password: str, stored: str) -> bool:
+    try:
+        _, salt_hex, digest_hex = stored.split("$", 2)
+        actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1)
+        return hmac.compare_digest(actual.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
+
+
+def _auth_payload(user: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    token = create_access_token(UUID(str(user["id"])), str(user["email"]), settings)
+    return {"access_token": token, "token_type": "bearer", "user": {"id": str(user["id"]), "email": user["email"], "full_name": user.get("full_name")}}
+
+
+@router.post("/auth/sign-up", status_code=201)
+def auth_sign_up(payload: dict[str, Any] = Body(...), settings: Settings = Depends(get_settings)):
+    email = str(payload.get("email") or "").strip().lower()
+    password = str(payload.get("password") or "")
+    full_name = str(payload.get("full_name") or "").strip()[:120] or None
+    if "@" not in email or len(password) < 6:
+        raise ApiError(400, "invalid_signup", "Enter a valid email and a password with at least 6 characters.")
+    client = database_client(settings)
+    if client.table("users").select("id").eq("email", email).limit(1).execute().data:
+        raise ApiError(409, "user_already_exists", "An account with this email already exists.")
+    user_id = str(uuid.uuid4())
+    user = client.table("users").insert({"id": user_id, "email": email, "full_name": full_name, "password_hash": _password_hash(password)}).execute().data[0]
+    client.table("profiles").insert({"id": user_id, "full_name": full_name or ""}).execute()
+    for table in ("candidate_preferences", "notification_preferences", "privacy_preferences"):
+        client.table(table).insert({"user_id": user_id}).execute()
+    return _auth_payload(user, settings)
+
+
+@router.post("/auth/sign-in")
+def auth_sign_in(payload: dict[str, Any] = Body(...), settings: Settings = Depends(get_settings)):
+    email = str(payload.get("email") or "").strip().lower()
+    password = str(payload.get("password") or "")
+    rows = database_client(settings).table("users").select("*").eq("email", email).limit(1).execute().data
+    if not rows or not _password_matches(password, str(rows[0].get("password_hash") or "")):
+        raise ApiError(401, "invalid_credentials", "Email or password is incorrect.")
+    return _auth_payload(rows[0], settings)
+
+
+@router.post("/auth/session")
+def auth_session(user: CurrentUser = Depends(get_current_user)):
+    return {"user": {"id": str(user.id), "email": user.email, "full_name": user.full_name}}
+
+
+@router.post("/auth/sign-out", status_code=204)
+def auth_sign_out(response: Response):
+    response.delete_cookie("career_copilot_session")
+
+
+@router.post("/auth/resend")
+def auth_resend():
+    return {"message": "Email delivery is not configured for local development."}
+
+
+@router.post("/auth/reset-password")
+def auth_reset_password():
+    return {"message": "Password reset email delivery is not configured for local development."}
+
+
+@router.post("/auth/update-password")
+def auth_update_password(payload: dict[str, Any] = Body(...), user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
+    password = str(payload.get("password") or "")
+    if len(password) < 6:
+        raise ApiError(400, "invalid_password", "Password must contain at least 6 characters.")
+    database_client(settings).table("users").update({"password_hash": _password_hash(password)}).eq("id", str(user.id)).execute()
+    return {"updated": True}
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def ensure_preference_row(client, table: str, user_id: str) -> dict[str, Any]:
+    """Return a candidate preference row, repairing legacy users missing defaults."""
+    rows = (
+        client.table(table)
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if rows:
+        return rows[0]
+    created = client.table(table).upsert({"user_id": user_id}).execute().data or []
+    if not created:
+        raise ApiError(500, "preferences_unavailable", "Candidate preferences could not be loaded.")
+    return created[0]
 
 
 @router.get("/health")
@@ -81,7 +182,7 @@ def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return {
         "status": "ok",
         "service": settings.app_name,
-        "supabase_configured": settings.supabase_configured,
+        "database_configured": settings.database_configured,
         "nvidia_configured": settings.nvidia_configured,
         "groq_configured": settings.groq_configured,
         "agent_count": status["agent_count"],
@@ -96,26 +197,21 @@ def agent_status(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return agents_status(settings)
 
 
-@router.get("/health/supabase")
-def health_supabase(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
-    if not settings.supabase_configured:
-        raise ApiError(503, "supabase_not_configured", "Supabase is not configured.")
-    try:
-        from app.supabase_clients import create_admin_supabase_client
+@router.get("/health/database")
+def health_database(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    return database_probe(settings)
 
-        admin = create_admin_supabase_client(settings)
-        # Lightweight connectivity probe against a core candidate table.
-        admin.table("profiles").select("id").limit(1).execute()
-        return {"status": "reachable", "configured": True, "tables_reachable": True}
-    except ApiError:
-        return {
-            "status": "configured",
-            "configured": True,
-            "tables_reachable": False,
-            "admin_probe": "unavailable",
-        }
-    except Exception:
-        return {"status": "configured", "configured": True, "tables_reachable": False}
+
+@router.get("/files/{bucket}/{path:path}")
+def local_file(bucket: str, path: str, user: CurrentUser = Depends(get_current_user), settings: Settings = Depends(get_settings)):
+    allowed = {settings.document_bucket, settings.avatar_bucket, settings.interview_bucket}
+    if bucket not in allowed or not path.startswith(f"{user.id}/"):
+        raise ApiError(404, "file_not_found", "The requested file was not found.")
+    root = (Path(settings.local_storage_dir).resolve() / bucket).resolve()
+    target = (root / Path(path)).resolve()
+    if root not in target.parents or not target.is_file():
+        raise ApiError(404, "file_not_found", "The requested file was not found.")
+    return FileResponse(target)
 
 
 @router.get("/me/bootstrap")
@@ -173,13 +269,6 @@ def bootstrap(
     )
     recent_activity = list_recent_activity(client, user)
     latest_actions = _latest_actions(client, user)
-    unread = (
-        client.table("user_notifications")
-        .select("id", count="exact")
-        .eq("user_id", str(user.id))
-        .is_("read_at", "null")
-        .execute()
-    )
     counts = {}
     for key, table in {
         "resumes": "resumes",
@@ -207,11 +296,24 @@ def bootstrap(
         "active_job_description": latest_jd[0] if latest_jd else None,
         "latest_ats_analysis": latest_analysis[0] if latest_analysis else None,
         "latest_actions": latest_actions,
-        "unread_notification_count": unread.count or 0,
         "counts": counts,
         "recent_activity": recent_activity,
         "workspace": {
-            "profile_completion": profile.get("profile_completion") or 0,
+            "profile_completion": max(
+                0, min(100, int(profile.get("profile_completion") or 0))
+            ),
+            "profile_completion_details": profile.get("profile_completion_details") or {},
+            # Server checklist only — never include retired criteria (e.g. old "resume" weight).
+            "profile_missing": [
+                item
+                for item in (
+                    (profile.get("profile_completion_details") or {}).get("missing") or []
+                )
+                if isinstance(item, dict)
+                and item.get("key")
+                and item.get("label")
+                and str(item.get("key")) != "resume"
+            ],
             "has_active_resume": bool(active_resume),
             "has_confirmed_resume": bool(confirmed_resume.count),
             "failed_ats_count": failed_ats,
@@ -449,12 +551,7 @@ def get_profile(user: CurrentUser = Depends(get_current_user), settings: Setting
     profile = recalculate_completion(client, user)
     return {
         "profile": attach_avatar_url(profile, client, settings),
-        "preferences": client.table("candidate_preferences")
-        .select("*")
-        .eq("user_id", str(user.id))
-        .single()
-        .execute()
-        .data,
+        "preferences": ensure_preference_row(client, "candidate_preferences", str(user.id)),
     }
 
 
@@ -595,13 +692,11 @@ def update_preferences(
     settings: Settings = Depends(get_settings),
 ):
     client = client_for(settings, user)
-    result = (
-        client.table("candidate_preferences")
-        .update(payload.model_dump())
-        .eq("user_id", str(user.id))
-        .execute()
-        .data
-    )
+    result = client.table("candidate_preferences").upsert(
+        {"user_id": str(user.id), **payload.model_dump()}
+    ).execute().data or []
+    if not result:
+        raise ApiError(500, "preferences_save_failed", "Candidate preferences could not be saved.")
     recalculate_completion(client, user)
     write_activity(
         client, user, "profile_updated", "Candidate preferences updated", "preferences", str(user.id)
@@ -2174,6 +2269,19 @@ def add_response(
 ):
     client = client_for(settings, user)
     owned_row(client, "interview_sessions", session_id, user)
+    question = (
+        client.table("interview_questions")
+        .select("id")
+        .eq("id", str(payload.question_id))
+        .eq("session_id", str(session_id))
+        .eq("user_id", str(user.id))
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not question:
+        raise ApiError(404, "question_not_found", "The question does not belong to this interview session.")
     return (
         client.table("interview_responses")
         .insert({**payload.model_dump(mode="json"), "session_id": str(session_id), "user_id": str(user.id)})
@@ -2337,15 +2445,19 @@ def patch_saved_job(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    return (
+    result = (
         client_for(settings, user)
         .table("saved_jobs")
         .update(payload.model_dump())
         .eq("job_id", str(job_id))
         .eq("user_id", str(user.id))
         .execute()
-        .data[0]
+        .data
+        or []
     )
+    if not result:
+        raise ApiError(404, "saved_job_not_found", "The job is not saved to your account.")
+    return result[0]
 
 
 @router.delete("/saved-jobs/{job_id}", status_code=204)
@@ -2363,18 +2475,8 @@ def get_settings_records(
 ):
     client = client_for(settings, user)
     return {
-        "notifications": client.table("notification_preferences")
-        .select("*")
-        .eq("user_id", str(user.id))
-        .single()
-        .execute()
-        .data,
-        "privacy": client.table("privacy_preferences")
-        .select("*")
-        .eq("user_id", str(user.id))
-        .single()
-        .execute()
-        .data,
+        "notifications": ensure_preference_row(client, "notification_preferences", str(user.id)),
+        "privacy": ensure_preference_row(client, "privacy_preferences", str(user.id)),
     }
 
 
@@ -2384,14 +2486,13 @@ def update_notifications(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    return (
-        client_for(settings, user)
-        .table("notification_preferences")
-        .update(payload.model_dump())
-        .eq("user_id", str(user.id))
-        .execute()
-        .data[0]
-    )
+    client = client_for(settings, user)
+    result = client.table("notification_preferences").upsert(
+        {"user_id": str(user.id), **payload.model_dump()}
+    ).execute().data or []
+    if not result:
+        raise ApiError(500, "notifications_save_failed", "Notification settings could not be saved.")
+    return result[0]
 
 
 @router.put("/settings/privacy")
@@ -2400,14 +2501,13 @@ def update_privacy(
     user: CurrentUser = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
 ):
-    return (
-        client_for(settings, user)
-        .table("privacy_preferences")
-        .update(payload.model_dump())
-        .eq("user_id", str(user.id))
-        .execute()
-        .data[0]
-    )
+    client = client_for(settings, user)
+    result = client.table("privacy_preferences").upsert(
+        {"user_id": str(user.id), **payload.model_dump()}
+    ).execute().data or []
+    if not result:
+        raise ApiError(500, "privacy_save_failed", "Privacy settings could not be saved.")
+    return result[0]
 
 
 @router.delete("/account", status_code=204)
@@ -2426,7 +2526,7 @@ def delete_account(
     Steps:
       1) Collect storage paths from owned rows (user-scoped client / RLS)
       2) Purge storage objects (admin client)
-      3) Delete auth.users row (admin) — public tables cascade via ON DELETE CASCADE
+      3) Delete the local users row; public tables cascade via ON DELETE CASCADE
     """
     confirmation = (payload.confirmation if payload else None) or x_confirm_delete
     if not confirmation_is_valid(confirmation):
@@ -2446,7 +2546,7 @@ def delete_account(
     user_client = client_for(settings, user)
     storage_paths = collect_user_storage_paths(user_client, user)
 
-    admin = create_admin_supabase_client(settings)
+    admin = database_client(settings)
     try:
         purge_user_storage(admin, settings, user, storage_paths)
     except Exception:
@@ -2454,10 +2554,10 @@ def delete_account(
         pass
 
     try:
-        admin.auth.admin.delete_user(str(user.id))
+        admin.table("users").delete().eq("id", str(user.id)).execute()
     except Exception as exc:
         raise ApiError(
             500,
             "account_deletion_failed",
-            "The account could not be deleted. Confirm SUPABASE_SECRET_KEY is set on the API.",
+            "The account could not be deleted from the local database.",
         ) from exc

@@ -5,7 +5,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Button, Card, Input, PageHeader, Progress, Select, Textarea } from "@/components/ui/primitives";
 import { apiRequest } from "@/lib/api/client";
-import { createClient } from "@/lib/supabase/client";
+import { createClient } from "@/lib/auth/client";
+import {
+  clampCompletion,
+  extractMissing,
+  notifyProfileUpdated,
+} from "@/lib/profile-completion";
 
 const tabs = [
   ["/settings/profile", "Profile"],
@@ -566,7 +571,8 @@ export function ProfileSettings() {
   const [education, setEducation] = useState<ProfileRecord[]>([]);
   const [links, setLinks] = useState<ProfileRecord[]>([]);
   const [skillName, setSkillName] = useState("");
-  const [experienceDraft, setExperienceDraft] = useState({
+  const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
+  const emptyExperienceDraft = {
     company_name: "",
     role_title: "",
     location: "",
@@ -575,13 +581,20 @@ export function ProfileSettings() {
     end_date: "",
     is_current: false,
     summary: "",
-  });
-  const [educationDraft, setEducationDraft] = useState({ institution: "", degree: "", field_of_study: "" });
-  const [linkDraft, setLinkDraft] = useState({ link_type: "linkedin", url: "", label: "" });
+  };
+  const [experienceDraft, setExperienceDraft] = useState(emptyExperienceDraft);
+  const [editingExperienceId, setEditingExperienceId] = useState<string | null>(null);
+  const emptyEducationDraft = { institution: "", degree: "", field_of_study: "" };
+  const [educationDraft, setEducationDraft] = useState(emptyEducationDraft);
+  const [editingEducationId, setEditingEducationId] = useState<string | null>(null);
+  const emptyLinkDraft = { link_type: "linkedin", url: "", label: "" };
+  const [linkDraft, setLinkDraft] = useState(emptyLinkDraft);
+  const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [recordBusy, setRecordBusy] = useState(false);
   const [resumes, setResumes] = useState<ResumeListItem[]>([]);
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [fillBusy, setFillBusy] = useState(false);
@@ -623,6 +636,15 @@ export function ProfileSettings() {
       apiRequest<ProfileRecord[]>("/profile/links"),
     ]);
     applyLoaded(profilePayload, skillRows, experienceRows, educationRows, linkRows);
+    const profile = profilePayload?.profile || {};
+    const details = profile.profile_completion_details as
+      | { missing?: Array<{ key: string; label: string; points?: number }> }
+      | undefined;
+    notifyProfileUpdated({
+      profile_completion: Number(profile.profile_completion ?? 0),
+      profile_completion_details: details || null,
+      profile_missing: extractMissing(details, null),
+    });
     return profilePayload;
   }, [applyLoaded]);
 
@@ -642,6 +664,15 @@ export function ProfileSettings() {
         setResumes(resumeRows || []);
         const firstVersion = resumeRows?.find((r) => r.latest_version?.id)?.latest_version?.id || "";
         setSelectedVersionId(firstVersion);
+        const profile = profilePayload?.profile || {};
+        const details = profile.profile_completion_details as
+          | { missing?: Array<{ key: string; label: string; points?: number }> }
+          | undefined;
+        notifyProfileUpdated({
+          profile_completion: Number(profile.profile_completion ?? 0),
+          profile_completion_details: details || null,
+          profile_missing: extractMissing(details, null),
+        });
       })
       .catch((e: Error) => {
         if (active) setError(e.message);
@@ -852,20 +883,44 @@ export function ProfileSettings() {
     }
   }
 
-  async function addSkill() {
+  function startEditSkill(skill: ProfileRecord) {
+    setEditingSkillId(String(skill.id));
+    setSkillName(String(skill.name || ""));
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditSkill() {
+    setEditingSkillId(null);
+    setSkillName("");
+  }
+
+  async function saveSkill() {
     if (!skillName.trim()) return;
     setError("");
     setMessage("");
+    setRecordBusy(true);
     try {
-      await apiRequest("/profile/skills", {
-        method: "POST",
-        body: JSON.stringify({ name: skillName.trim(), source: "candidate" }),
-      });
+      if (editingSkillId) {
+        await apiRequest(`/profile/skills/${editingSkillId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ name: skillName.trim() }),
+        });
+        setMessage("Skill updated.");
+      } else {
+        await apiRequest("/profile/skills", {
+          method: "POST",
+          body: JSON.stringify({ name: skillName.trim(), source: "candidate" }),
+        });
+        setMessage("Skill saved to your account.");
+      }
       setSkillName("");
+      setEditingSkillId(null);
       await loadAll();
-      setMessage("Skill saved to your account.");
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setRecordBusy(false);
     }
   }
 
@@ -939,6 +994,10 @@ export function ProfileSettings() {
     setMessage("");
     try {
       await apiRequest(`/profile/${resource}/${id}`, { method: "DELETE" });
+      if (resource === "skills" && editingSkillId === id) cancelEditSkill();
+      if (resource === "experiences" && editingExperienceId === id) cancelEditExperience();
+      if (resource === "education" && editingEducationId === id) cancelEditEducation();
+      if (resource === "links" && editingLinkId === id) cancelEditLink();
       await loadAll();
       setMessage(`${label} removed from your account.`);
     } catch (e) {
@@ -946,76 +1005,177 @@ export function ProfileSettings() {
     }
   }
 
-  async function addExperience() {
+  function toDateInput(value: unknown) {
+    if (!value) return "";
+    const text = String(value);
+    return text.length >= 10 ? text.slice(0, 10) : text;
+  }
+
+  function startEditExperience(item: ProfileRecord) {
+    setEditingExperienceId(String(item.id));
+    setExperienceDraft({
+      company_name: String(item.company_name || ""),
+      role_title: String(item.role_title || ""),
+      location: String(item.location || ""),
+      employment_type: String(item.employment_type || ""),
+      start_date: toDateInput(item.start_date),
+      end_date: toDateInput(item.end_date),
+      is_current: Boolean(item.is_current),
+      summary: String(item.summary || ""),
+    });
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditExperience() {
+    setEditingExperienceId(null);
+    setExperienceDraft(emptyExperienceDraft);
+  }
+
+  async function saveExperience() {
     if (!experienceDraft.company_name.trim() || !experienceDraft.role_title.trim()) return;
     setError("");
     setMessage("");
+    setRecordBusy(true);
+    const body = {
+      company_name: experienceDraft.company_name.trim(),
+      role_title: experienceDraft.role_title.trim(),
+      location: experienceDraft.location.trim() || null,
+      employment_type: experienceDraft.employment_type || null,
+      start_date: experienceDraft.start_date || null,
+      end_date: experienceDraft.is_current ? null : experienceDraft.end_date || null,
+      is_current: experienceDraft.is_current,
+      summary: experienceDraft.summary.trim() || null,
+    };
     try {
-      await apiRequest("/profile/experiences", {
-        method: "POST",
-        body: JSON.stringify({
-          company_name: experienceDraft.company_name.trim(),
-          role_title: experienceDraft.role_title.trim(),
-          location: experienceDraft.location.trim() || null,
-          employment_type: experienceDraft.employment_type || null,
-          start_date: experienceDraft.start_date || null,
-          end_date: experienceDraft.is_current ? null : experienceDraft.end_date || null,
-          is_current: experienceDraft.is_current,
-          summary: experienceDraft.summary.trim() || null,
-        }),
-      });
-      setExperienceDraft({ company_name: "", role_title: "", location: "", employment_type: "", start_date: "", end_date: "", is_current: false, summary: "" });
+      if (editingExperienceId) {
+        await apiRequest(`/profile/experiences/${editingExperienceId}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        setMessage("Experience updated.");
+      } else {
+        await apiRequest("/profile/experiences", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        setMessage("Experience saved to your account.");
+      }
+      cancelEditExperience();
       await loadAll();
-      setMessage("Experience saved to your account.");
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setRecordBusy(false);
     }
   }
 
-  async function addEducation() {
+  function startEditEducation(item: ProfileRecord) {
+    setEditingEducationId(String(item.id));
+    setEducationDraft({
+      institution: String(item.institution || ""),
+      degree: String(item.degree || ""),
+      field_of_study: String(item.field_of_study || ""),
+    });
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditEducation() {
+    setEditingEducationId(null);
+    setEducationDraft(emptyEducationDraft);
+  }
+
+  async function saveEducation() {
     if (!educationDraft.institution.trim()) return;
     setError("");
     setMessage("");
+    setRecordBusy(true);
+    const body = {
+      institution: educationDraft.institution.trim(),
+      degree: educationDraft.degree || null,
+      field_of_study: educationDraft.field_of_study.trim() || null,
+    };
     try {
-      await apiRequest("/profile/education", {
-        method: "POST",
-        body: JSON.stringify({
-          institution: educationDraft.institution.trim(),
-          degree: educationDraft.degree || null,
-          field_of_study: educationDraft.field_of_study.trim() || null,
-        }),
-      });
-      setEducationDraft({ institution: "", degree: "", field_of_study: "" });
+      if (editingEducationId) {
+        await apiRequest(`/profile/education/${editingEducationId}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        setMessage("Education updated.");
+      } else {
+        await apiRequest("/profile/education", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        setMessage("Education saved to your account.");
+      }
+      cancelEditEducation();
       await loadAll();
-      setMessage("Education saved to your account.");
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setRecordBusy(false);
     }
   }
 
-  async function addLink() {
+  function startEditLink(item: ProfileRecord) {
+    setEditingLinkId(String(item.id));
+    setLinkDraft({
+      link_type: String(item.link_type || "other"),
+      url: String(item.url || ""),
+      label: String(item.label || ""),
+    });
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditLink() {
+    setEditingLinkId(null);
+    setLinkDraft(emptyLinkDraft);
+  }
+
+  async function saveLink() {
     if (!linkDraft.url.trim()) return;
     setError("");
     setMessage("");
+    setRecordBusy(true);
+    const body = {
+      link_type: linkDraft.link_type,
+      url: linkDraft.url.trim(),
+      label: linkDraft.label.trim() || null,
+    };
     try {
-      await apiRequest("/profile/links", {
-        method: "POST",
-        body: JSON.stringify({
-          link_type: linkDraft.link_type,
-          url: linkDraft.url.trim(),
-          label: linkDraft.label.trim() || null,
-        }),
-      });
-      setLinkDraft({ link_type: "linkedin", url: "", label: "" });
+      if (editingLinkId) {
+        await apiRequest(`/profile/links/${editingLinkId}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        setMessage("Link updated.");
+      } else {
+        await apiRequest("/profile/links", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        setMessage("Link saved to your account.");
+      }
+      cancelEditLink();
       await loadAll();
-      setMessage("Link saved to your account.");
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setRecordBusy(false);
     }
   }
 
-  const completion = Number(form.profile_completion || 0);
+  const completion = clampCompletion(form.profile_completion);
   const profileComplete = completion >= 100;
+  const missingFromDetails = extractMissing(
+    form.profile_completion_details as
+      | { missing?: Array<{ key: string; label: string; points?: number }> }
+      | undefined,
+    null,
+  );
   const yearsValue =
     form.years_experience === null || form.years_experience === undefined || form.years_experience === ""
       ? ""
@@ -1032,8 +1192,25 @@ export function ProfileSettings() {
         </Card>
       ) : (
         <div className="stack">
-          <Card className={`stack completion-panel ${profileComplete ? "is-complete" : ""}`} aria-hidden={profileComplete}>
+          <Card className="stack">
             <Progress value={completion} label="Profile completion" />
+            {!profileComplete && missingFromDetails.length > 0 ? (
+              <div className="stack" style={{ gap: 6 }}>
+                <p style={{ margin: 0, fontWeight: 650 }}>Still needed to complete your profile</p>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {missingFromDetails.map((item) => (
+                    <li key={item.key}>
+                      {item.label}
+                      {item.points != null ? ` (+${item.points}%)` : ""}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : profileComplete ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Profile complete — great work.
+              </p>
+            ) : null}
           </Card>
 
           <Card className="stack panel-blue">
@@ -1444,7 +1621,7 @@ export function ProfileSettings() {
             <div className="cluster" style={{ alignItems: "end" }}>
               <div style={{ flex: 1, minWidth: 220 }}>
                 <SelectWithOther
-                  label="Skill"
+                  label={editingSkillId ? "Edit skill" : "Skill"}
                   options={SKILL_OPTIONS}
                   value={skillName}
                   onChange={setSkillName}
@@ -1452,18 +1629,37 @@ export function ProfileSettings() {
                   otherPlaceholder="Enter skill name"
                 />
               </div>
-              <Button onClick={addSkill} disabled={!skillName.trim()}>
-                Add skill
+              <Button onClick={() => void saveSkill()} disabled={!skillName.trim() || recordBusy}>
+                {editingSkillId ? "Save skill" : "Add skill"}
               </Button>
-              <Button variant="secondary" onClick={importSkillsFromResume}>
-                Import from resume
-              </Button>
+              {editingSkillId ? (
+                <Button variant="secondary" onClick={cancelEditSkill} disabled={recordBusy}>
+                  Cancel
+                </Button>
+              ) : (
+                <Button variant="secondary" onClick={importSkillsFromResume} disabled={recordBusy}>
+                  Import from resume
+                </Button>
+              )}
             </div>
             <div className="cluster">
               {skills.length === 0 && <p style={{ margin: 0 }}>No skills saved yet.</p>}
               {skills.map((skill) => (
-                <span key={skill.id} className="badge badge-info" style={{ gap: 8 }}>
+                <span
+                  key={skill.id}
+                  className={`badge ${editingSkillId === skill.id ? "badge-warning" : "badge-info"}`}
+                  style={{ gap: 8 }}
+                >
                   {skill.name}
+                  <button
+                    type="button"
+                    className="button-quiet"
+                    style={{ minHeight: "auto", padding: 0, boxShadow: "none", border: "none" }}
+                    onClick={() => startEditSkill(skill)}
+                    aria-label={`Edit ${skill.name}`}
+                  >
+                    Edit
+                  </button>
                   <button
                     type="button"
                     className="button-quiet"
@@ -1551,12 +1747,21 @@ export function ProfileSettings() {
                 />
               </label>
             </div>
-            <Button
-              onClick={addExperience}
-              disabled={!experienceDraft.company_name.trim() || !experienceDraft.role_title.trim()}
-            >
-              Add experience
-            </Button>
+            <div className="cluster">
+              <Button
+                onClick={() => void saveExperience()}
+                disabled={
+                  !experienceDraft.company_name.trim() || !experienceDraft.role_title.trim() || recordBusy
+                }
+              >
+                {editingExperienceId ? "Save experience" : "Add experience"}
+              </Button>
+              {editingExperienceId ? (
+                <Button variant="secondary" onClick={cancelEditExperience} disabled={recordBusy}>
+                  Cancel edit
+                </Button>
+              ) : null}
+            </div>
             {experiences.length === 0 ? (
               <p style={{ margin: 0 }}>
                 No experience records yet. Add one, or set years of experience to 0 for fresher credit.
@@ -1567,6 +1772,7 @@ export function ProfileSettings() {
                   <div>
                     <strong>
                       {item.role_title} · {item.company_name}
+                      {editingExperienceId === item.id ? " · editing" : ""}
                     </strong>
                     <p style={{ margin: 0 }}>
                       {[experienceDateLabel(item), item.employment_type, item.location, item.summary]
@@ -1574,9 +1780,18 @@ export function ProfileSettings() {
                         .join(" · ") || "Saved experience"}
                     </p>
                   </div>
-                  <Button variant="secondary" onClick={() => removeRecord("experiences", item.id, "Experience")}>
-                    Remove
-                  </Button>
+                  <div className="cluster">
+                    <Button variant="secondary" onClick={() => startEditExperience(item)} disabled={recordBusy}>
+                      Edit
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => removeRecord("experiences", item.id, "Experience")}
+                      disabled={recordBusy}
+                    >
+                      Remove
+                    </Button>
+                  </div>
                 </div>
               ))
             )}
@@ -1612,23 +1827,45 @@ export function ProfileSettings() {
                 otherPlaceholder="Enter field of study"
               />
             </div>
-            <Button onClick={addEducation} disabled={!educationDraft.institution.trim()}>
-              Add education
-            </Button>
+            <div className="cluster">
+              <Button
+                onClick={() => void saveEducation()}
+                disabled={!educationDraft.institution.trim() || recordBusy}
+              >
+                {editingEducationId ? "Save education" : "Add education"}
+              </Button>
+              {editingEducationId ? (
+                <Button variant="secondary" onClick={cancelEditEducation} disabled={recordBusy}>
+                  Cancel edit
+                </Button>
+              ) : null}
+            </div>
             {education.length === 0 ? (
               <p style={{ margin: 0 }}>No education records yet.</p>
             ) : (
               education.map((item) => (
                 <div key={item.id} className="row">
                   <div>
-                    <strong>{item.institution}</strong>
+                    <strong>
+                      {item.institution}
+                      {editingEducationId === item.id ? " · editing" : ""}
+                    </strong>
                     <p style={{ margin: 0 }}>
                       {[item.degree, item.field_of_study].filter(Boolean).join(" · ") || "Saved education"}
                     </p>
                   </div>
-                  <Button variant="secondary" onClick={() => removeRecord("education", item.id, "Education")}>
-                    Remove
-                  </Button>
+                  <div className="cluster">
+                    <Button variant="secondary" onClick={() => startEditEducation(item)} disabled={recordBusy}>
+                      Edit
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => removeRecord("education", item.id, "Education")}
+                      disabled={recordBusy}
+                    >
+                      Remove
+                    </Button>
+                  </div>
                 </div>
               ))
             )}
@@ -1670,21 +1907,40 @@ export function ProfileSettings() {
                 />
               </label>
             </div>
-            <Button onClick={addLink} disabled={!linkDraft.url.trim()}>
-              Add link
-            </Button>
+            <div className="cluster">
+              <Button onClick={() => void saveLink()} disabled={!linkDraft.url.trim() || recordBusy}>
+                {editingLinkId ? "Save link" : "Add link"}
+              </Button>
+              {editingLinkId ? (
+                <Button variant="secondary" onClick={cancelEditLink} disabled={recordBusy}>
+                  Cancel edit
+                </Button>
+              ) : null}
+            </div>
             {links.length === 0 ? (
               <p style={{ margin: 0 }}>No links saved yet.</p>
             ) : (
               links.map((item) => (
                 <div key={item.id} className="row">
                   <div>
-                    <strong>{item.label || item.link_type}</strong>
+                    <strong>
+                      {item.label || item.link_type}
+                      {editingLinkId === item.id ? " · editing" : ""}
+                    </strong>
                     <p style={{ margin: 0 }}>{item.url}</p>
                   </div>
-                  <Button variant="secondary" onClick={() => removeRecord("links", item.id, "Link")}>
-                    Remove
-                  </Button>
+                  <div className="cluster">
+                    <Button variant="secondary" onClick={() => startEditLink(item)} disabled={recordBusy}>
+                      Edit
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => removeRecord("links", item.id, "Link")}
+                      disabled={recordBusy}
+                    >
+                      Remove
+                    </Button>
+                  </div>
                 </div>
               ))
             )}
@@ -1725,11 +1981,11 @@ export function AccountSettings() {
   useEffect(() => {
     let active = true;
     (async () => {
-      const supabase = createClient();
-      if (!supabase) return;
+      const authClient = createClient();
+      if (!authClient) return;
       const {
         data: { user },
-      } = await supabase.auth.getUser();
+      } = await authClient.auth.getUser();
       if (active && user?.email) setAccountEmail(user.email);
     })().catch(() => undefined);
     return () => {
@@ -1798,11 +2054,6 @@ export function AccountSettings() {
     <Frame title="Account & access" description="Sign-in and password recovery are managed securely for your account.">
       <Card className="stack">
         <h2 style={{ margin: 0 }}>Session</h2>
-        {accountEmail ? (
-          <p style={{ margin: 0 }}>
-            Signed in as <strong>{accountEmail}</strong>
-          </p>
-        ) : null}
         <div className="cluster">
           <Button variant="secondary" onClick={change}>
             Send password recovery link

@@ -16,13 +16,14 @@ class Settings(BaseSettings):
     app_name: str = "Career Copilot API"
     app_env: str = "development"
     api_v1_prefix: str = "/api/v1"
+    public_api_base_url: str = "http://127.0.0.1:8000"
     log_level: str = "INFO"
     frontend_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )
-    supabase_url: str = ""
-    supabase_publishable_key: str = ""
-    supabase_secret_key: str = ""
+    database_path: str = str(ROOT_DIR / ".data" / "career-copilot.sqlite")
+    auth_secret: str = "career-copilot-local-development-secret"
+    local_storage_dir: str = str(ROOT_DIR / ".data" / "storage")
     document_max_bytes: int = 10 * 1024 * 1024
     # Profile pictures must stay under 3 MB (enforced in API + storage bucket policy).
     avatar_max_bytes: int = 3 * 1024 * 1024
@@ -58,7 +59,7 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    @field_validator("supabase_url", "nvidia_base_url", "groq_base_url")
+    @field_validator("nvidia_base_url", "groq_base_url")
     @classmethod
     def validate_server_url(cls, value: str) -> str:
         if not value:
@@ -88,8 +89,8 @@ class Settings(BaseSettings):
         return self
 
     @property
-    def supabase_configured(self) -> bool:
-        return bool(self.supabase_url and self.supabase_publishable_key)
+    def database_configured(self) -> bool:
+        return bool(self.database_path)
 
     @property
     def nvidia_configured(self) -> bool:

@@ -143,7 +143,7 @@ def purge_user_storage(admin_client, settings: Settings, user: CurrentUser, know
                 seen.add(path)
                 unique.append(path)
 
-        # Remove in chunks (Supabase accepts a list of paths)
+        # Remove in chunks to keep filesystem work bounded.
         chunk_size = 50
         for index in range(0, len(unique), chunk_size):
             chunk = unique[index : index + chunk_size]

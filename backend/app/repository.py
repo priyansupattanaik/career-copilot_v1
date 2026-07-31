@@ -7,7 +7,7 @@ from app.auth import CurrentUser
 from app.config import Settings
 from app.errors import ApiError
 from app.profile_completion import calculate_profile_completion
-from app.supabase_clients import create_user_supabase_client
+from app.database import database_client
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ CANDIDATE_TABLES = {
 
 
 def client_for(settings: Settings, user: CurrentUser):
-    return create_user_supabase_client(settings, user)
+    return database_client(settings)
 
 
 def owned_rows(client, table: str, user: CurrentUser, order: str | None = None) -> list[dict[str, Any]]:
@@ -121,7 +121,7 @@ def write_activity(
                 "entity_id": entity_id,
             }
         ).execute()
-        # Always retain only the newest MAX_ACTIVITY_EVENTS rows in Supabase.
+        # Always retain only the newest MAX_ACTIVITY_EVENTS rows in local SQLite.
         prune_activity_events(client, user, keep=MAX_ACTIVITY_EVENTS)
     except Exception:
         logger.warning("activity_write_failed operation=%s user_id=%s", event_type, user.id)
@@ -151,40 +151,63 @@ def sync_profile_from_auth_metadata(client, user: CurrentUser) -> dict[str, Any]
 
 
 def recalculate_completion(client, user: CurrentUser) -> dict[str, Any]:
+    """
+    Recompute profile completion from live DB rows and persist both percentage and details.
+
+    Details always include a `missing` list with human labels used by toast / dashboard UI.
+    Never invent requirements — only checklist items backed by real profile data.
+    """
     # Keep full_name in sync with sign-up metadata before scoring completion.
     profile = sync_profile_from_auth_metadata(client, user)
-    preferences = (
-        client.table("candidate_preferences").select("*").eq("user_id", str(user.id)).single().execute().data
-        or {}
+
+    # Prefer limit(1) over .single() so a missing preferences row does not break scoring.
+    pref_rows = (
+        client.table("candidate_preferences")
+        .select("*")
+        .eq("user_id", str(user.id))
+        .limit(1)
+        .execute()
+        .data
+        or []
     )
+    preferences = pref_rows[0] if pref_rows else {}
+
     years = profile.get("years_experience")
     try:
-        no_experience_declared = years is not None and float(years) == 0
+        years_num = float(years) if years is not None and years != "" else None
     except (TypeError, ValueError):
-        no_experience_declared = False
+        years_num = None
+    # Fresher path: only an explicit 0 counts — null/blank is not "declared fresher".
+    no_experience_declared = years_num is not None and years_num == 0.0
+
+    experience_rows = owned_rows(client, "candidate_experiences", user)
+    skill_rows = owned_rows(client, "candidate_skills", user)
+    education_rows = owned_rows(client, "candidate_education", user)
+    link_rows = owned_rows(client, "candidate_links", user)
+
+    # Resume is intentionally excluded from profile completion scoring.
     context = {
         "profile": profile,
         "preferences": preferences,
-        "has_experience": bool(owned_rows(client, "candidate_experiences", user)),
+        "has_experience": bool(experience_rows),
         "no_experience_declared": no_experience_declared,
-        "skill_count": len(owned_rows(client, "candidate_skills", user)),
-        "education_count": len(owned_rows(client, "candidate_education", user)),
-        "link_count": len(owned_rows(client, "candidate_links", user)),
-        "has_valid_resume": bool(
-            client.table("resume_versions")
-            .select("id")
-            .eq("user_id", str(user.id))
-            .eq("extraction_status", "confirmed")
-            .limit(1)
-            .execute()
-            .data
-        ),
+        "skill_count": len(skill_rows),
+        "education_count": len(education_rows),
+        "link_count": len(link_rows),
     }
     percentage, details = calculate_profile_completion(context)
-    return (
+    updated = (
         client.table("profiles")
         .update({"profile_completion": percentage, "profile_completion_details": details})
         .eq("id", str(user.id))
         .execute()
-        .data[0]
+        .data
     )
+    if not updated:
+        # Fall back so callers still get a consistent shape if the update returns empty.
+        return {
+            **profile,
+            "profile_completion": percentage,
+            "profile_completion_details": details,
+        }
+    return updated[0]

@@ -43,8 +43,8 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Supabase CLI local temp
-supabase/.temp/
+# Local database files and uploaded objects
+.data/
 
 # Editor
 .idea/

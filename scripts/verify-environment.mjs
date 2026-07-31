@@ -13,13 +13,9 @@ const environment = Object.fromEntries(
 );
 
 const checks = [
-  ["NEXT_PUBLIC_SUPABASE_URL", "CLIENT-SAFE"],
-  ["NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "CLIENT-SAFE"],
   ["NEXT_PUBLIC_API_BASE_URL", "CLIENT-SAFE"],
-  ["SUPABASE_URL", "SERVER-ONLY"],
-  ["SUPABASE_PUBLISHABLE_KEY", "SERVER-ONLY"],
-  ["SUPABASE_SECRET_KEY", "SERVER-ONLY"],
-  ["SUPABASE_DB_URL", "SERVER-ONLY"],
+  ["DATABASE_PATH", "SERVER-ONLY"],
+  ["AUTH_SECRET", "SERVER-ONLY"],
   ["NVIDIA_API_KEY", "SERVER-ONLY"],
   ["NVIDIA_BASE_URL", "SERVER-ONLY"],
   ["NVIDIA_MODEL", "SERVER-ONLY"],
@@ -50,17 +46,11 @@ for (const name of Object.keys(environment)) {
   }
 }
 
-for (const name of ["NEXT_PUBLIC_SUPABASE_URL", "NEXT_PUBLIC_API_BASE_URL", "SUPABASE_URL", "NVIDIA_BASE_URL"]) {
+for (const name of ["NEXT_PUBLIC_API_BASE_URL", "NVIDIA_BASE_URL"]) {
   requireAbsoluteHttpUrl(name);
 }
 if (environment.GROQ_BASE_URL) requireAbsoluteHttpUrl("GROQ_BASE_URL");
 
-if (environment.NEXT_PUBLIC_SUPABASE_URL !== environment.SUPABASE_URL) {
-  failures.push("Frontend and backend Supabase projects are CONFLICTING");
-}
-if (environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY !== environment.SUPABASE_PUBLISHABLE_KEY) {
-  failures.push("Frontend and backend publishable keys are CONFLICTING");
-}
 if (environment.NVIDIA_API_KEY && !environment.NVIDIA_MODEL) {
   failures.push("NVIDIA_MODEL: MISSING while live generation is enabled");
 }

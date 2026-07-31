@@ -33,7 +33,6 @@ export function LandingPage() {
           <div className="nav-links">
             <a href="#journey">How it works</a>
             <a href="#modules">Features</a>
-            <Link href="/sign-in">Sign in</Link>
             <ButtonLink href="/sign-up">Get started</ButtonLink>
             <ThemeToggle />
           </div>
@@ -45,7 +44,6 @@ export function LandingPage() {
       {open && (
         <div className="mobile-drawer">
           <a href="#journey">How it works</a>
-          <Link href="/sign-in">Sign in</Link>
           <ButtonLink href="/sign-up">Get started</ButtonLink>
           <div style={{ display: 'flex', justifyContent: 'center', marginTop: '10px' }}>
             <ThemeToggle />
@@ -63,9 +61,6 @@ export function LandingPage() {
             </p>
             <div className="cluster">
               <ButtonLink href="/sign-up">Build my profile</ButtonLink>
-              <ButtonLink href="/sign-in" variant="secondary">
-                Sign in
-              </ButtonLink>
             </div>
             <p className="hero-note">
               <ShieldCheck size={16} />
@@ -148,7 +143,6 @@ export function LandingPage() {
           </div>
           <div className="cluster">
             <Link href="/settings/privacy">Privacy</Link>
-            <Link href="/sign-in">Sign in</Link>
           </div>
         </div>
       </footer>

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Card, Input, PageHeader, Textarea } from "@/components/ui/primitives";
 import { apiRequest } from "@/lib/api/client";
-import { createClient } from "@/lib/supabase/client";
+import { createClient } from "@/lib/auth/client";
 
 type OnboardingForm = {
   full_name: string;
@@ -51,10 +51,10 @@ export function Onboarding() {
         // 2) Fallback: Auth user_metadata from the browser session (sign-up full name).
         let authName = "";
         try {
-          const supabase = createClient();
+          const authClient = createClient();
           const {
             data: { user },
-          } = (await supabase?.auth.getUser()) || { data: { user: null } };
+          } = (await authClient?.auth.getUser()) || { data: { user: null } };
           authName = pickNameFromAuthMeta(
             (user?.user_metadata || {}) as Record<string, unknown>,
           );
@@ -75,10 +75,10 @@ export function Onboarding() {
         if (!active) return;
         // Still try Auth metadata so the name is not blank if /profile fails briefly.
         try {
-          const supabase = createClient();
+          const authClient = createClient();
           const {
             data: { user },
-          } = (await supabase?.auth.getUser()) || { data: { user: null } };
+          } = (await authClient?.auth.getUser()) || { data: { user: null } };
           const authName = pickNameFromAuthMeta(
             (user?.user_metadata || {}) as Record<string, unknown>,
           );

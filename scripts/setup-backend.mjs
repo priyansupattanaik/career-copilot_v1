@@ -77,16 +77,6 @@ function findPython() {
   return null;
 }
 
-function venvIsCorrectPython(expectedMajorMinor) {
-  if (!existsSync(venvPython)) return false;
-  const info = probePython(venvPython);
-  if (!info || !isSupported(info)) return false;
-  if (existsSync(venvMarker)) {
-    // soft check only
-  }
-  return `${info.major}.${info.minor}` === expectedMajorMinor || isSupported(info);
-}
-
 console.log("Career Copilot backend setup: selecting Python 3.11–3.13 …");
 const selected = findPython();
 if (!selected) {

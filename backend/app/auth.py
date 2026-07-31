@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from uuid import UUID
 
-import httpx
-from fastapi import Depends, Header
+import jwt
+from fastapi import Cookie, Depends, Header
 
 from app.config import Settings, get_settings
 from app.errors import ApiError
+from app.database import database_client
 
 
 @dataclass(frozen=True)
@@ -25,42 +26,29 @@ def parse_bearer_header(value: str | None) -> str:
     return token.strip()
 
 
-def _metadata_full_name(payload: dict) -> str | None:
-    """Extract display name from Supabase Auth user payload (sign-up metadata)."""
-    meta = payload.get("user_metadata") if isinstance(payload.get("user_metadata"), dict) else {}
-    for key in ("full_name", "name", "fullName"):
-        value = meta.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()[:120]
-    return None
+def create_access_token(user_id: UUID, email: str, settings: Settings) -> str:
+    return jwt.encode({"sub": str(user_id), "email": email}, settings.auth_secret, algorithm="HS256")
+
+
+def _user_from_token(token: str, settings: Settings) -> CurrentUser:
+    try:
+        payload = jwt.decode(token, settings.auth_secret, algorithms=["HS256"])
+        user_id = UUID(str(payload["sub"]))
+    except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
+        raise ApiError(401, "invalid_access_token", "The authentication session is invalid or expired.") from exc
+    rows = database_client(settings).table("users").select("id,email,full_name").eq("id", str(user_id)).limit(1).execute().data
+    if not rows:
+        raise ApiError(401, "invalid_user_identity", "The authentication identity is invalid.")
+    row = rows[0]
+    return CurrentUser(id=user_id, email=row.get("email"), access_token=token, full_name=row.get("full_name"))
 
 
 async def get_current_user(
-    authorization: str | None = Header(default=None), settings: Settings = Depends(get_settings)
+    authorization: str | None = Header(default=None),
+    career_copilot_session: str | None = Cookie(default=None),
+    settings: Settings = Depends(get_settings),
 ) -> CurrentUser:
-    if not settings.supabase_configured:
-        raise ApiError(503, "supabase_not_configured", "Supabase is not configured on the API server.")
-    token = parse_bearer_header(authorization)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(
-                f"{settings.supabase_url.rstrip('/')}/auth/v1/user",
-                headers={"apikey": settings.supabase_publishable_key, "Authorization": f"Bearer {token}"},
-            )
-    except httpx.HTTPError as exc:
-        raise ApiError(
-            503, "authentication_dependency_unavailable", "Authentication is temporarily unavailable."
-        ) from exc
-    if response.status_code != 200:
-        raise ApiError(401, "invalid_access_token", "The authentication session is invalid or expired.")
-    payload = response.json()
-    try:
-        user_id = UUID(payload["id"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ApiError(401, "invalid_user_identity", "The authentication identity is invalid.") from exc
-    return CurrentUser(
-        id=user_id,
-        email=payload.get("email"),
-        access_token=token,
-        full_name=_metadata_full_name(payload),
-    )
+    token = parse_bearer_header(authorization) if authorization else career_copilot_session
+    if not token:
+        raise ApiError(401, "authentication_required", "Authentication is required.")
+    return _user_from_token(token, settings)

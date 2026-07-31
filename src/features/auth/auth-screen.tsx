@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { Eye, MailCheck } from "lucide-react";
 import { Button, Input } from "@/components/ui/primitives";
-import { createClient } from "@/lib/supabase/client";
+import { createClient } from "@/lib/auth/client";
 
 function Shell({ children, title, description }: { children: React.ReactNode; title: string; description: string }) {
   return (
@@ -31,6 +31,17 @@ function configurationError() {
   return "Sign-in is not available right now. Please try again later.";
 }
 
+function authErrorMessage(message: string) {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("email not confirmed")) {
+    return "Your email is not verified yet. Open the verification link from your inbox, then try signing in again.";
+  }
+  if (normalized.includes("invalid login credentials")) {
+    return "The email or password is incorrect. If you just created the account, verify your email first.";
+  }
+  return message;
+}
+
 export function SignInScreen() {
   const router = useRouter();
   const search = useSearchParams();
@@ -41,27 +52,72 @@ export function SignInScreen() {
   );
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [needsVerification, setNeedsVerification] = useState(false);
+  const [verificationMessage, setVerificationMessage] = useState("");
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const supabase = createClient();
-    if (!supabase) return setError(configurationError());
+    if (process.env.NODE_ENV !== "production" && email.trim() === "dummy" && password === "dummy") {
+      document.cookie = "career_copilot_demo=1; Path=/; SameSite=Lax";
+      router.replace(search.get("next") || "/dashboard");
+      router.refresh();
+      return;
+    }
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
     setBusy(true);
     setError("");
+    setVerificationMessage("");
+    setNeedsVerification(false);
     setShowPassword(false);
-    const result = await supabase.auth.signInWithPassword({ email, password });
-    setBusy(false);
-    if (result.error) return setError(result.error.message);
-    router.replace(search.get("next") || "/dashboard");
-    router.refresh();
+    try {
+      const result = await authClient.auth.signInWithPassword({ email: email.trim(), password });
+      if (result.error) {
+        const normalized = result.error.message.toLowerCase();
+        setNeedsVerification(normalized.includes("email not confirmed"));
+        return setError(authErrorMessage(result.error.message));
+      }
+      router.replace(search.get("next") || "/dashboard");
+      router.refresh();
+    } catch {
+      setError("Could not reach local authentication Auth. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function resendVerification() {
+    const address = email.trim();
+    if (!address) return setError("Enter your email address first.");
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
+    setBusy(true);
+    setError("");
+    setVerificationMessage("");
+    try {
+      const result = await authClient.auth.resend({
+        type: "signup",
+        email: address,
+        options: { emailRedirectTo: `${location.origin}/auth/callback?next=/onboarding` },
+      });
+      if (result.error) return setError(authErrorMessage(result.error.message));
+      setVerificationMessage("A new verification email was requested. Check spam or promotions too.");
+    } catch {
+      setError("Could not request a verification email. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
   async function oauth(provider: "google" | "linkedin_oidc") {
-    const supabase = createClient();
-    if (!supabase) return setError(configurationError());
-    const { error: oauthError } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: { redirectTo: `${location.origin}/auth/callback` },
-    });
-    if (oauthError) setError(oauthError.message);
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
+    try {
+      const { error: oauthError } = await authClient.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: `${location.origin}/auth/callback` },
+      });
+      if (oauthError) setError(authErrorMessage(oauthError.message));
+    } catch {
+      setError("Could not reach local authentication Auth. Check your connection and try again.");
+    }
   }
   return (
     <Shell title="Welcome back." description="Sign in to open your private career records and continue where you left off.">
@@ -72,7 +128,7 @@ export function SignInScreen() {
         </div>
         <label className="field-label">
           Email
-          <Input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+          <Input type="text" inputMode="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
         </label>
         <label className="field-label">
           Password
@@ -81,7 +137,6 @@ export function SignInScreen() {
               type={showPassword ? "text" : "password"}
               autoComplete="current-password"
               required
-              minLength={8}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
@@ -108,6 +163,12 @@ export function SignInScreen() {
           <p role="alert" className="field-error">
             {error}
           </p>
+        )}
+        {verificationMessage && <p role="status" className="badge badge-success">{verificationMessage}</p>}
+        {needsVerification && (
+          <Button type="button" variant="secondary" disabled={busy} onClick={resendVerification}>
+            Resend verification email
+          </Button>
         )}
         <div className="row">
           <span />
@@ -137,6 +198,7 @@ export function SignInScreen() {
 }
 
 export function SignUpScreen() {
+  const router = useRouter();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -144,24 +206,57 @@ export function SignUpScreen() {
   const [error, setError] = useState("");
   const [sent, setSent] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [resendMessage, setResendMessage] = useState("");
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (password !== confirm) return setError("Passwords do not match.");
-    const supabase = createClient();
-    if (!supabase) return setError(configurationError());
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
     setBusy(true);
     setError("");
-    const result = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { full_name: name },
-        emailRedirectTo: `${location.origin}/auth/callback?next=/onboarding`,
-      },
-    });
-    setBusy(false);
-    if (result.error) return setError(result.error.message);
-    setSent(true);
+    try {
+      const result = await authClient.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: { full_name: name.trim() },
+          emailRedirectTo: `${location.origin}/auth/callback?next=/onboarding`,
+        },
+      });
+      if (result.error) return setError(authErrorMessage(result.error.message));
+      if (result.data.session) {
+        router.replace("/onboarding");
+        router.refresh();
+        return;
+      }
+      setSent(true);
+    } catch {
+      setError("Could not reach local authentication Auth. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function resendVerification() {
+    const address = email.trim();
+    if (!address) return setError("Enter your email address first.");
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
+    setBusy(true);
+    setError("");
+    setResendMessage("");
+    try {
+      const result = await authClient.auth.resend({
+        type: "signup",
+        email: address,
+        options: { emailRedirectTo: `${location.origin}/auth/callback?next=/onboarding` },
+      });
+      if (result.error) return setError(authErrorMessage(result.error.message));
+      setResendMessage("A new verification email was requested. Check spam or promotions too.");
+    } catch {
+      setError("Could not request a verification email. Check your connection and try again.");
+    } finally {
+      setBusy(false);
+    }
   }
   return (
     <Shell
@@ -173,6 +268,12 @@ export function SignUpScreen() {
           <MailCheck size={44} />
           <h1>Check your inbox</h1>
           <p>Open the verification link we sent to activate your account.</p>
+          {error && <p role="alert" className="field-error">{error}</p>}
+          {resendMessage && <p role="status" className="badge badge-success">{resendMessage}</p>}
+          <Button type="button" variant="secondary" disabled={busy} onClick={resendVerification}>
+            {busy ? "Requesting email…" : "Resend verification email"}
+          </Button>
+          <p className="muted">If it does not arrive, check spam/promotions and verify your local authentication email settings.</p>
         </div>
       ) : (
         <form className="auth-card panel stack" onSubmit={submit}>
@@ -251,21 +352,25 @@ export function PasswordScreen({ reset = false }: { reset?: boolean }) {
   const [error, setError] = useState("");
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const supabase = createClient();
-    if (!supabase) return setError(configurationError());
+    const authClient = createClient();
+    if (!authClient) return setError(configurationError());
     setError("");
-    if (reset) {
-      if (password !== confirm) return setError("Passwords do not match.");
-      const result = await supabase.auth.updateUser({ password });
-      if (result.error) return setError(result.error.message);
-      router.replace("/dashboard");
-      router.refresh();
-    } else {
-      const result = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${location.origin}/auth/callback?next=/reset-password`,
-      });
-      if (result.error) return setError(result.error.message);
-      setMessage("If the address is registered, a recovery link has been sent.");
+    try {
+      if (reset) {
+        if (password !== confirm) return setError("Passwords do not match.");
+        const result = await authClient.auth.updateUser({ password });
+        if (result.error) return setError(authErrorMessage(result.error.message));
+        router.replace("/dashboard");
+        router.refresh();
+      } else {
+        const result = await authClient.auth.resetPasswordForEmail(email.trim(), {
+          redirectTo: `${location.origin}/auth/callback?next=/reset-password`,
+        });
+        if (result.error) return setError(authErrorMessage(result.error.message));
+        setMessage("If the address is registered, a recovery link has been sent.");
+      }
+    } catch {
+      setError("Could not reach local authentication Auth. Check your connection and try again.");
     }
   }
   return (

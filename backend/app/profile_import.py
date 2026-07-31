@@ -4,7 +4,7 @@ from app.errors import ApiError
 
 
 def insert_validated_batch(client: Any, table: str, rows: list[dict[str, Any]]) -> int:
-    """Insert a validated batch atomically through one PostgREST request."""
+    """Insert a validated batch through the local database adapter."""
     if not rows:
         return 0
     try:

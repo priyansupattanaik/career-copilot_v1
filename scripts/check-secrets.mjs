@@ -9,9 +9,7 @@ const textExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".json", ".md", ".
 const rules = [
   ["NVIDIA API key", /nvapi-[A-Za-z0-9_-]+/g],
   ["Groq API key", /gsk_[A-Za-z0-9]{20,}/g],
-  ["Supabase secret key", /sb_secret_[A-Za-z0-9_-]+/g],
   ["JWT-like credential", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g],
-  ["Credential-bearing database URL", /postgres(?:ql)?:\/\/[^\s:@]+:[^\s@]+@/gi],
 ];
 
 const findings = [];
