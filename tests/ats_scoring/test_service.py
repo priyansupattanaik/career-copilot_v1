@@ -2,8 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.ats_scoring import crew
-from app.ats_scoring.schemas import (
+from app.agents.ats_scoring import crew
+from app.ats.scoring.schemas import (
     JDParsed,
     ExperienceEntry,
     GateResult,
@@ -11,7 +11,7 @@ from app.ats_scoring.schemas import (
     ResumeParsed,
     ScoreResult,
 )
-from app.ats_scoring.service import score_resume_jd
+from app.ats.scoring.service import score_resume_jd
 
 
 class ServiceTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class ServiceTests(unittest.TestCase):
             composite_score=80,
             reasons={key: "structured evidence" for key in PARAMETER_KEYS},
         )
-        with patch("app.ats_scoring.service.run_pipeline", new=AsyncMock(return_value=expected)):
+        with patch("app.ats.scoring.service.run_pipeline", new=AsyncMock(return_value=expected)):
             result = asyncio.run(score_resume_jd("resume text", "job description"))
         self.assertEqual(result, expected)
 

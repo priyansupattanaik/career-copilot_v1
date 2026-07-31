@@ -242,6 +242,23 @@ create index if not exists jobs_active_published_idx on jobs(is_active,published
 create index if not exists activity_events_user_created_idx on activity_events(user_id,created_at desc);
 create index if not exists user_notifications_unread_idx on user_notifications(user_id,created_at desc) where read_at is null;
 
+-- Candidate pages filter every collection by user_id. Keep these reads indexed.
+create index if not exists candidate_skills_user_idx on candidate_skills(user_id);
+create index if not exists candidate_experiences_user_order_idx on candidate_experiences(user_id,display_order,created_at desc);
+create index if not exists candidate_projects_user_order_idx on candidate_projects(user_id,display_order,created_at desc);
+create index if not exists candidate_education_user_order_idx on candidate_education(user_id,display_order,created_at desc);
+create index if not exists candidate_certifications_user_idx on candidate_certifications(user_id,created_at desc);
+create index if not exists candidate_languages_user_order_idx on candidate_languages(user_id,display_order,created_at desc);
+create index if not exists candidate_links_user_order_idx on candidate_links(user_id,display_order,created_at desc);
+create index if not exists resumes_user_active_idx on resumes(user_id,is_active,deleted_at,created_at desc);
+create index if not exists resume_versions_user_created_idx on resume_versions(user_id,created_at desc);
+create index if not exists job_descriptions_user_created_idx on job_descriptions(user_id,created_at desc);
+create index if not exists ats_analyses_user_status_created_idx on ats_analyses(user_id,status,created_at desc);
+create index if not exists interview_sessions_user_status_created_idx on interview_sessions(user_id,status,created_at desc);
+create index if not exists learning_paths_user_status_created_idx on learning_paths(user_id,status,created_at desc);
+create index if not exists saved_jobs_user_status_updated_idx on saved_jobs(user_id,status,updated_at desc);
+create index if not exists ats_evidence_analysis_idx on ats_evidence(analysis_id,user_id);
+
 
 create table if not exists resume_improvement_runs (
   id TEXT primary key default '',
@@ -274,7 +291,6 @@ create index if not exists resume_suggestions_run_idx
   on resume_suggestions(run_id);
 create index if not exists resume_exports_version_idx
   on resume_exports(resume_version_id);
-
 
 
 
