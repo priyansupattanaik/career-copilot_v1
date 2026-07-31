@@ -29,7 +29,14 @@ from app.schemas import ResumeImprovementCreate, ResumeSuggestionDecision
 
 
 def capabilities(settings: Settings) -> dict[str, Any]:
+    from app.agents.crew import crew_capability
+    from app.agents.llm import GroqClient
+    from app.agents.registry import agents_status
+
     provider = NvidiaClient(settings).capability()
+    groq = GroqClient(settings).capability()
+    status = agents_status(settings)
+    crew = crew_capability(settings)
     return {
         "nvidia_configured": provider["configured"],
         "selected_model": provider["model"],
@@ -37,6 +44,12 @@ def capabilities(settings: Settings) -> dict[str, Any]:
         "export_formats": ["pdf", "docx"],
         "ats_context_available": True,
         "manual_editing_available": True,
+        "groq_configured": groq.get("configured"),
+        "groq_model": groq.get("model"),
+        "agents": status["agents"],
+        "agent_count": status["agent_count"],
+        "crew": crew,
+        "orchestration": "crewai_compatible_sequential",
     }
 
 
@@ -85,6 +98,8 @@ async def generate_improvements(
         },
     )
     try:
+        from app.agents.crew import run_resume_improvement_crew
+
         update_run(client, run["id"], user, {"status": "generating"})
         context["job_description"] = (
             {
@@ -95,11 +110,20 @@ async def generate_improvements(
             else None
         )
         context["ats_evidence"] = ats_evidence
-        result = await NvidiaClient(settings).generate(context)
+        # Full evidence blocks for the crew validator (ids must match model citations).
+        from dataclasses import asdict
+        context["_blocks"] = [asdict(b) for b in blocks]
+        # CrewAI-compatible sequential multi-agent run (gap → generate → validate).
+        result, crew_audit = await run_resume_improvement_crew(
+            settings,
+            context,
+            allowed_sections=set(payload.section_keys),
+        )
         update_run(client, run["id"], user, {"status": "validating"})
         block_map = {block.block_id: block for block in blocks}
         stored: list[dict[str, Any]] = []
         blocked = 0
+        # Final gate: same validator as before (crew already filtered; this is belt-and-suspenders).
         for suggestion in result.suggestions:
             validation = validate_suggestion(suggestion, block_map, set(payload.section_keys))
             if validation.status == "blocked":
@@ -125,20 +149,40 @@ async def generate_improvements(
                 }
             )
         suggestions = insert_suggestions(client, stored)
-        summary = {"received": len(result.suggestions), "available": len(suggestions), "blocked": blocked}
+        crew_received = len(result.suggestions)
+        for task in crew_audit.tasks:
+            if task.name == "validate_suggestions" and isinstance(task.output, dict):
+                crew_received = int(task.output.get("received") or crew_received)
+        summary = {
+            "received": crew_received,
+            "available": len(suggestions),
+            "blocked": max(0, crew_received - len(suggestions)),
+            "orchestration": crew_audit.runtime,
+            "crew_process": crew_audit.process,
+            "crew_tasks": [
+                {"name": t.name, "status": t.status, "agent": t.agent_role} for t in crew_audit.tasks
+            ],
+        }
         run = update_run(
             client,
             run["id"],
             user,
             {"status": "completed", "validation_summary": summary, "completed_at": now_iso()},
         )
+        crew_meta = {
+            "runtime": crew_audit.runtime,
+            "process": crew_audit.process,
+            "tasks": summary["crew_tasks"],
+            "message": crew_audit.message,
+        }
         if not suggestions:
             return {
                 "run": run,
                 "suggestions": [],
                 "message": "No safe improvements were generated from the available evidence.",
+                "crew": crew_meta,
             }
-        return {"run": run, "suggestions": suggestions}
+        return {"run": run, "suggestions": suggestions, "crew": crew_meta}
     except ApiError as exc:
         update_run(
             client, run["id"], user, {"status": "failed", "error_code": exc.code, "completed_at": now_iso()}

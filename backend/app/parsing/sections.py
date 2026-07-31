@@ -56,6 +56,9 @@ HEADING_ALIASES: dict[str, frozenset[str]] = {
             "technologies",
             "tech stack",
             "tools technologies",
+            "skills technologies",
+            "skills and technologies",
+            "skills & technologies",
             "technical proficiencies",
             "areas of expertise",
             "technical expertise",
@@ -124,6 +127,7 @@ HEADING_ALIASES: dict[str, frozenset[str]] = {
             "trainings and certifications",
         }
     ),
+    "courses": frozenset({"courses", "relevant courses", "coursework", "training"}),
     "languages": frozenset(
         {
             "languages",
@@ -192,6 +196,24 @@ HEADING_ALIASES: dict[str, frozenset[str]] = {
             "preferred requirements",
         }
     ),
+    "company_description": frozenset(
+        {
+            "about the company",
+            "about us",
+            "company overview",
+            "company description",
+        }
+    ),
+    "benefits": frozenset({"benefits", "what we offer", "perks and benefits", "employee benefits"}),
+    "legal": frozenset(
+        {
+            "equal opportunity",
+            "equal employment opportunity",
+            "eeo statement",
+            "work authorization",
+            "legal information",
+        }
+    ),
 }
 
 # Longest aliases first so "professional experience" wins over "experience".
@@ -221,9 +243,7 @@ _DATE_RANGE_RE = re.compile(
     re.I,
 )
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
-_PHONE_RE = re.compile(
-    r"(?:\+?\d{1,3}[\s\-.]?)?(?:\(?\d{2,4}\)?[\s\-.]?)?\d{3,4}[\s\-.]?\d{3,4}"
-)
+_PHONE_RE = re.compile(r"(?:\+?\d{1,3}[\s\-.]?)?(?:\(?\d{2,4}\)?[\s\-.]?)?\d{3,4}[\s\-.]?\d{3,4}")
 _URL_RE = re.compile(r"https?://\S+|www\.\S+|(?:linkedin|github)\.com/\S+", re.I)
 _ENTRY_SECTIONS = frozenset({"experience", "projects", "education", "certifications", "achievements"})
 # Sections that must never absorb content after a different major heading without switching
@@ -352,9 +372,7 @@ def _group_section_entries(section: str, lines: list[str]) -> list[str]:
         stripped = line.strip()
         if current and _is_entry_start(stripped, section) and not _is_bullet_line(stripped):
             prior_has_body = any(_is_bullet_line(item) for item in current)
-            prior_is_header = _is_entry_start(current[0], section) or bool(
-                _DATE_RANGE_RE.search(current[0])
-            )
+            prior_is_header = _is_entry_start(current[0], section) or bool(_DATE_RANGE_RE.search(current[0]))
             if prior_has_body or prior_is_header:
                 if prior_has_body or _DATE_RANGE_RE.search(stripped) or "|" in stripped:
                     flush()
@@ -454,6 +472,17 @@ def extract_sections(text: str, schema_version: str = "resume-extraction-v1") ->
     for key, lines in raw_sections.items():
         cleaned = [line for line in lines if line is not None]
         grouped = _group_section_entries(key, cleaned)
+        if key in {"requirements", "preferred_qualifications"}:
+            negated = [
+                line
+                for line in grouped
+                if re.search(
+                    r"\b(?:no|not|without)\b.*\b(?:required|needed|necessary)\b", line, re.I
+                )
+            ]
+            if negated:
+                grouped = [line for line in grouped if line not in negated]
+                unclassified.extend(negated)
         if grouped:
             sections[key] = grouped
 
@@ -461,7 +490,11 @@ def extract_sections(text: str, schema_version: str = "resume-extraction-v1") ->
     if not sections:
         warnings.append("No recognised section headings were found; review all extracted text.")
     else:
-        if schema_version.startswith("resume") and "experience" not in sections and "projects" not in sections:
+        if (
+            schema_version.startswith("resume")
+            and "experience" not in sections
+            and "projects" not in sections
+        ):
             warnings.append("No professional experience or projects section was detected.")
         # Cross-check: if both skills and projects exist, ensure no shared first lines
         if "skills" in sections and "projects" in sections:
@@ -470,7 +503,8 @@ def extract_sections(text: str, schema_version: str = "resume-extraction-v1") ->
                 first = proj.splitlines()[0].strip().casefold() if proj else ""
                 if first and first in skill_set:
                     warnings.append(
-                        "A project title also appears under skills; verify section headings in the source file."
+                        "A project title also appears under skills; verify section headings "
+                        "in the source file."
                     )
                     break
 

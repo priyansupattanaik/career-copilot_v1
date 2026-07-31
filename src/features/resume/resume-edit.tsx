@@ -67,6 +67,17 @@ type Suggestion = {
 type Capabilities = {
   improvement_available?: boolean;
   export_formats?: string[];
+  nvidia_configured?: boolean;
+  groq_configured?: boolean;
+  agent_count?: number;
+  agents?: Array<{
+    id: string;
+    name: string;
+    ready?: boolean;
+    configured?: boolean;
+    provider?: string;
+    model?: string | null;
+  }>;
 };
 
 /** Preferred display order; any extra keys from the existing resume are appended. */
@@ -253,16 +264,18 @@ export function AtsResumeEdit() {
     [entries],
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError("");
     try {
-      const record = await apiRequest<Analysis>(`/ats-analyses/${reportId}`);
+      const record = await apiRequest<Analysis>(`/ats-analyses/${reportId}`, { signal });
+      if (signal?.aborted) return;
       setAnalysis(record);
       if (!record.resume_version_id) {
         throw new Error("This analysis is missing a resume version.");
       }
-      const ver = await apiRequest<ResumeVersion>(`/resume-versions/${record.resume_version_id}`);
+      const ver = await apiRequest<ResumeVersion>(`/resume-versions/${record.resume_version_id}`, { signal });
+      if (signal?.aborted) return;
       setVersion(ver);
       const next = structuredToEntries(ver.structured_content);
       setEntries(next);
@@ -271,20 +284,25 @@ export function AtsResumeEdit() {
       setHeaderLines(header);
       setSavedHeader(header);
       try {
-        const caps = await apiRequest<Capabilities>("/resume-improvements/capabilities");
+        const caps = await apiRequest<Capabilities>("/resume-improvements/capabilities", { signal });
+        if (signal?.aborted) return;
         setCapabilities(caps);
       } catch {
-        setCapabilities({ improvement_available: false, export_formats: ["pdf", "docx"] });
+        if (!signal?.aborted) {
+          setCapabilities({ improvement_available: false, export_formats: ["pdf", "docx"] });
+        }
       }
     } catch (e) {
-      setError((e as Error).message);
+      if (!signal?.aborted) setError((e as Error).message);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [reportId]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    queueMicrotask(() => void load(controller.signal));
+    return () => controller.abort();
   }, [load]);
 
   function setEntry(section: string, index: number, value: string) {
@@ -828,8 +846,19 @@ export function AtsResumeEdit() {
           same resume in place.
           {!capabilities?.improvement_available
             ? " NVIDIA is not configured — manual edit, export, and re-score still work."
-            : ""}
+            : " NVIDIA resume-improvement agent is ready."}
         </p>
+        {capabilities?.agents?.length ? (
+          <p className="muted mono" style={{ margin: 0, fontSize: "var(--text-xs)" }}>
+            Agents:{" "}
+            {capabilities.agents
+              .map(
+                (a) =>
+                  `${a.id}${a.configured ? "(ai)" : "(fallback)"}`,
+              )
+              .join(" · ")}
+          </p>
+        ) : null}
         <fieldset className="section-picker">
           <legend>Sections (max 4)</legend>
           {sectionKeys.map((key) => (

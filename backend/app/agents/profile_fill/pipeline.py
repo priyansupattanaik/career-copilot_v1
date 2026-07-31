@@ -371,14 +371,24 @@ async def build_profile_draft_enriched(
         )
         ai_draft = _llm_to_draft(result)
         merged = merge_profile_drafts(base, ai_draft, plain_text=text)
+        meta = dict(merged.get("meta") or {})
+        meta["agent"] = "profile_fill"
+        meta["provider"] = "nvidia"
+        meta["fallback"] = False
+        merged["meta"] = meta
         return merged
     except Exception as exc:
         logger.warning("profile_ai_extract_failed error=%s", exc)
         meta = dict(base.get("meta") or {})
         meta["ai_used"] = False
         meta["method"] = "deterministic_resume_mapping_v1"
+        meta["agent"] = "profile_fill"
+        meta["provider"] = "deterministic"
+        meta["fallback"] = True
         warnings = list(meta.get("warnings") or [])
-        warnings.append("AI extraction failed or was unavailable; used deterministic mapping. You can retry later.")
+        warnings.append(
+            f"AI extraction failed or was unavailable ({type(exc).__name__}); used deterministic mapping. You can retry later."
+        )
         meta["warnings"] = warnings
         base["meta"] = meta
         return normalize_draft(base, resume_text=text)

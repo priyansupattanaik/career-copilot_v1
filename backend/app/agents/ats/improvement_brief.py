@@ -121,6 +121,8 @@ async def generate_ats_improvement_brief(
                 "focus_areas": focus[:12],
                 "provider": "nvidia",
                 "model": settings.nvidia_model,
+                "agent": "ats_improvement_brief",
+                "fallback": False,
             }
         except Exception as exc:
             logger.warning("ats_brief_nvidia_failed error=%s", exc)
@@ -148,14 +150,19 @@ async def generate_ats_improvement_brief(
                 "focus_areas": focus,
                 "provider": "groq",
                 "model": settings.groq_model,
+                "agent": "ats_improvement_brief",
+                "fallback": False,
             }
         except Exception as exc:
             logger.warning("ats_brief_groq_failed error=%s", exc)
 
-    return _deterministic_brief(
+    brief = _deterministic_brief(
         score=overall_score,
         missing=missing,
         matched_count=matched_count,
         total=total_terms,
         role_title=role_title,
     )
+    brief["agent"] = "ats_improvement_brief"
+    brief["fallback"] = True
+    return brief

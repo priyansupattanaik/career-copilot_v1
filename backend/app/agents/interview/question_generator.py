@@ -87,6 +87,7 @@ async def generate_interview_questions(
     count = max(1, min(int(count or 3), 20))
     mode = (mode or "mixed").strip().lower()
 
+    fallback_reason: str | None = None
     if settings.groq_configured:
         try:
             prompt = _PROMPT_PATH.read_text(encoding="utf-8")
@@ -116,14 +117,25 @@ async def generate_interview_questions(
                     "questions": questions,
                     "provider": "groq",
                     "model": settings.groq_model,
+                    "agent": "interview_questions",
+                    "fallback": False,
                 }
+            fallback_reason = "groq_returned_no_questions"
+            logger.warning("groq_interview_questions_empty")
         except ApiError as exc:
-            logger.warning("groq_interview_questions_failed code=%s", exc.code)
+            fallback_reason = exc.code
+            logger.warning("groq_interview_questions_failed code=%s message=%s", exc.code, exc.message)
         except Exception as exc:
+            fallback_reason = "groq_unexpected_error"
             logger.warning("groq_interview_questions_failed error=%s", exc)
+    else:
+        fallback_reason = "groq_not_configured"
 
     return {
         "questions": _template_questions(mode, count, target_role),
         "provider": "template",
         "model": None,
+        "agent": "interview_questions",
+        "fallback": True,
+        "fallback_reason": fallback_reason,
     }

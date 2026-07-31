@@ -1,8 +1,9 @@
 """
 Groq OpenAI-compatible chat client.
 
-Used for dedicated tasks (mock interview questions). This is intentionally
-separate from NVIDIA and must NOT be wired as an NVIDIA fallback.
+Used for dedicated tasks (mock interview questions, optional ATS brief).
+This is intentionally separate from NVIDIA and must NOT be wired as an
+NVIDIA fallback for resume improvement / profile fill.
 """
 
 from __future__ import annotations
@@ -15,6 +16,12 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from app.agents.llm.common import (
+    extract_message_content,
+    parse_json_object,
+    provider_error_detail,
+    strip_json_fence,
+)
 from app.config import Settings
 from app.errors import ApiError
 
@@ -32,19 +39,12 @@ class GroqClient:
             "configured": self.settings.groq_configured,
             "model": self.settings.groq_model or None,
             "provider": "groq",
-            "tasks": ["interview_questions"],
+            "base_url": self.settings.groq_base_url or None,
+            "tasks": ["interview_questions", "ats_improvement_brief"],
         }
 
     def _strip_json_fence(self, content: str) -> str:
-        text = (content or "").strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        return text
+        return strip_json_fence(content)
 
     async def generate_structured(
         self,
@@ -79,14 +79,40 @@ class GroqClient:
         }
         raw = await self._request(payload)
         try:
-            cleaned = self._strip_json_fence(raw)
-            return schema_model.model_validate(json.loads(cleaned))
-        except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
-            raise ApiError(
-                502,
-                "invalid_groq_response",
-                "Groq returned an invalid structured response.",
-            ) from exc
+            return schema_model.model_validate(parse_json_object(raw))
+        except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
+            # One repair pass (parity with NVIDIA client).
+            repair_path = PROMPTS_DIR / "repair_structured_output_v1.txt"
+            repair_prompt = (
+                repair_path.read_text(encoding="utf-8")
+                if repair_path.is_file()
+                else "Return only valid JSON matching the provided output_schema."
+            )
+            repair_payload = {
+                **payload,
+                "messages": [
+                    {"role": "system", "content": repair_prompt},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "invalid_output": strip_json_fence(raw)[:12_000],
+                                "output_schema": schema,
+                            },
+                            separators=(",", ":"),
+                        ),
+                    },
+                ],
+            }
+            repaired = await self._request(repair_payload)
+            try:
+                return schema_model.model_validate(parse_json_object(repaired))
+            except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+                raise ApiError(
+                    502,
+                    "invalid_groq_response",
+                    "Groq returned an invalid structured response after repair.",
+                ) from exc
 
     async def _request(self, payload: dict[str, Any]) -> str:
         headers = {
@@ -122,10 +148,14 @@ class GroqClient:
                 if response.status_code >= 500:
                     raise ApiError(503, "groq_unavailable", "Groq is temporarily unavailable.")
                 if response.status_code >= 400:
-                    raise ApiError(502, "groq_request_rejected", "Groq rejected the request.")
+                    detail = provider_error_detail(response.text)
+                    message = "Groq rejected the request."
+                    if detail:
+                        message = f"{message} ({detail})"
+                    raise ApiError(502, "groq_request_rejected", message)
                 try:
                     body = response.json()
-                    content = body["choices"][0]["message"]["content"]
+                    content = extract_message_content(body)
                 except (ValueError, KeyError, IndexError, TypeError) as exc:
                     raise ApiError(
                         502, "groq_response_unreadable", "Groq response could not be read."

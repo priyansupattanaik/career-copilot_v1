@@ -20,6 +20,7 @@ type Question = {
   position: number;
   question: string;
   question_type?: string | null;
+  source_context?: { provider?: string; model?: string | null } | null;
 };
 
 export function InterviewHome() {
@@ -28,13 +29,19 @@ export function InterviewHome() {
   const [message, setMessage] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  async function loadSessions() {
-    const rows = await apiRequest<Session[]>("/interviews");
-    setData(rows);
+  async function loadSessions(signal?: AbortSignal) {
+    const rows = await apiRequest<Session[]>("/interviews", { signal });
+    if (!signal?.aborted) setData(rows);
   }
 
   useEffect(() => {
-    loadSessions().catch((e: Error) => setError(e.message));
+    const controller = new AbortController();
+    queueMicrotask(() => {
+      void loadSessions(controller.signal).catch((e: Error) => {
+        if (!controller.signal.aborted) setError(e.message);
+      });
+    });
+    return () => controller.abort();
   }, []);
 
   async function deleteSession(session: Session) {
@@ -205,6 +212,7 @@ export function InterviewSession() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [questionSource, setQuestionSource] = useState<string>("");
 
   useEffect(() => {
     if (!sessionId) return;
@@ -214,6 +222,16 @@ export function InterviewSession() {
         if (!active) return;
         setSession(payload.session);
         setQuestions(payload.questions || []);
+        const ctx = payload.questions?.[0]?.source_context;
+        if (ctx?.provider) {
+          setQuestionSource(
+            ctx.provider === "groq"
+              ? `Questions from Groq agent${ctx.model ? ` (${ctx.model})` : ""}`
+              : ctx.provider === "template"
+                ? "Questions from local templates (Groq unavailable or not configured)"
+                : `Questions from ${ctx.provider}`,
+          );
+        }
       })
       .catch((e: Error) => {
         if (active) setError(e.message);
@@ -295,10 +313,15 @@ export function InterviewSession() {
       <PageHeader
         eyebrow="Interview session"
         title={session?.target_role ? `${session.target_role} practice` : "Practice workspace"}
-        description={`${session?.mode || "mixed"} · ${session?.status || "unknown"} · ${questions.length} question(s)`}
+        description={`${session?.mode || "mixed"} · ${session?.status || "unknown"} · ${questions.length} question(s)${questionSource ? ` · ${questionSource}` : ""}`}
       />
       {error && <p className="field-error">{error}</p>}
       {message && <p role="status">{message}</p>}
+      {questionSource ? (
+        <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
+          {questionSource}
+        </p>
+      ) : null}
       {!questions.length ? (
         <Card className="stack">
           <p>No questions are available for this session yet.</p>

@@ -5,8 +5,25 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, File, Form, Header, UploadFile
 
+from app.account_deletion import (
+    CONFIRM_PHRASE,
+    collect_user_storage_paths,
+    confirmation_is_valid,
+    email_matches_account,
+    purge_user_storage,
+)
+from app.agents.ats import generate_ats_improvement_brief
+from app.agents.interview import generate_interview_questions
+from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
+from app.agents.registry import agents_status
 from app.ats import ALGORITHM_VERSION, score_resume
 from app.auth import CurrentUser, get_current_user
+from app.avatars import (
+    attach_avatar_url,
+    avatar_extension_for_mime,
+    signed_avatar_url,
+    validate_avatar_upload,
+)
 from app.config import Settings, get_settings
 from app.documents import (
     extract_sections,
@@ -19,29 +36,14 @@ from app.documents import (
     validate_document,
 )
 from app.errors import ApiError
-from app.account_deletion import (
-    CONFIRM_PHRASE,
-    collect_user_storage_paths,
-    confirmation_is_valid,
-    email_matches_account,
-    purge_user_storage,
-)
-from app.avatars import (
-    attach_avatar_url,
-    avatar_extension_for_mime,
-    signed_avatar_url,
-    validate_avatar_upload,
-)
-from app.agents.ats import generate_ats_improvement_brief
-from app.agents.interview import generate_interview_questions
-from app.agents.profile_fill import build_profile_draft_enriched, profile_draft_response_payload
+from app.profile_import import insert_validated_batch
 from app.repository import (
     CANDIDATE_TABLES,
     client_for,
+    list_recent_activity,
     owned_row,
     owned_rows,
     recalculate_completion,
-    list_recent_activity,
     write_activity,
 )
 from app.resume_improvement_routes import router as resume_improvement_router
@@ -50,15 +52,15 @@ from app.schemas import (
     AtsAnalysisCreate,
     ExtractionPatch,
     InterviewCreate,
-    ProfileFromResumeApplyRequest,
-    ProfileFromResumePreviewRequest,
     InterviewResponseCreate,
+    JobDescriptionMetadataPatch,
     JobDescriptionTextCreate,
     LearningPathCreate,
     NotificationSettings,
-    JobDescriptionMetadataPatch,
     PreferencesUpdate,
     PrivacySettings,
+    ProfileFromResumeApplyRequest,
+    ProfileFromResumePreviewRequest,
     ProfilePatch,
     SavedJobPatch,
 )
@@ -74,13 +76,23 @@ def utc_now() -> str:
 
 @router.get("/health")
 def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    status = agents_status(settings)
     return {
         "status": "ok",
         "service": settings.app_name,
         "supabase_configured": settings.supabase_configured,
         "nvidia_configured": settings.nvidia_configured,
         "groq_configured": settings.groq_configured,
+        "agent_count": status["agent_count"],
+        "agents_ready": status["ready_count"],
+        "llm_agents_configured": status["llm_configured_agent_count"],
     }
+
+
+@router.get("/agents/status")
+def agent_status(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Public agent inventory + configuration readiness (no secrets)."""
+    return agents_status(settings)
 
 
 @router.get("/health/supabase")
@@ -95,7 +107,12 @@ def health_supabase(settings: Settings = Depends(get_settings)) -> dict[str, Any
         admin.table("profiles").select("id").limit(1).execute()
         return {"status": "reachable", "configured": True, "tables_reachable": True}
     except ApiError:
-        return {"status": "configured", "configured": True, "tables_reachable": False, "admin_probe": "unavailable"}
+        return {
+            "status": "configured",
+            "configured": True,
+            "tables_reachable": False,
+            "admin_probe": "unavailable",
+        }
     except Exception:
         return {"status": "configured", "configured": True, "tables_reachable": False}
 
@@ -202,11 +219,16 @@ def bootstrap(
         "capabilities": {
             "ats_scoring": True,
             "interview_evaluation": False,
-            "interview_questions": settings.groq_configured,
+            "interview_questions": True,  # Groq when configured; templates otherwise
+            "interview_questions_ai": settings.groq_configured,
+            "resume_improvements": settings.nvidia_configured,
+            "profile_fill_ai": settings.nvidia_configured,
+            "ats_improvement_brief_ai": settings.nvidia_configured or settings.groq_configured,
             "job_recommendations": False,
             "nvidia_configured": settings.nvidia_configured,
             "groq_configured": settings.groq_configured,
         },
+        "agents": agents_status(settings),
     }
 
 
@@ -368,7 +390,9 @@ def _normalize_token(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
-def _prepare_candidate_payload(resource: str, payload: dict[str, Any], *, require_core: bool) -> dict[str, Any]:
+def _prepare_candidate_payload(
+    resource: str, payload: dict[str, Any], *, require_core: bool
+) -> dict[str, Any]:
     data = {key: value for key, value in payload.items() if key not in {"user_id", "id"}}
     if resource == "skills":
         if "name" in data or require_core:
@@ -394,7 +418,10 @@ def _prepare_candidate_payload(resource: str, payload: dict[str, Any], *, requir
         if require_core or "link_type" in data or "url" in data:
             link_type = str(data.get("link_type") or "").strip()
             url = str(data.get("url") or "").strip()
-            if require_core and (link_type not in {"linkedin", "github", "portfolio", "website", "other"} or not url):
+            if require_core and (
+                link_type not in {"linkedin", "github", "portfolio", "website", "other"}
+                or not url
+            ):
                 raise ApiError(400, "invalid_link", "A valid link type and URL are required.")
             if link_type:
                 data["link_type"] = link_type
@@ -480,7 +507,11 @@ async def upload_profile_avatar(
             .data
         )
         if not updated:
-            raise ApiError(500, "avatar_profile_update_failed", "The profile picture path could not be saved.")
+            raise ApiError(
+                500,
+                "avatar_profile_update_failed",
+                "The profile picture path could not be saved.",
+            )
     except ApiError:
         try:
             client.storage.from_(settings.avatar_bucket).remove([new_path])
@@ -492,7 +523,11 @@ async def upload_profile_avatar(
             client.storage.from_(settings.avatar_bucket).remove([new_path])
         except Exception:
             pass
-        raise ApiError(500, "avatar_profile_update_failed", "The profile picture path could not be saved.") from exc
+        raise ApiError(
+            500,
+            "avatar_profile_update_failed",
+            "The profile picture path could not be saved.",
+        ) from exc
 
     if old_path and old_path != new_path:
         try:
@@ -835,6 +870,7 @@ def apply_profile_from_resume(
         str(row.get("normalized_name") or "").lower()
         for row in owned_rows(client, "candidate_skills", user)
     }
+    skill_rows: list[dict[str, Any]] = []
     for row in payload.skills or []:
         if not _selected(row):
             continue
@@ -844,19 +880,16 @@ def apply_profile_from_resume(
         normalized = _normalize_token(str(row.get("normalized_name") or name))
         if not normalized or normalized in existing_skills:
             continue
-        try:
-            client.table("candidate_skills").insert(
-                {
-                    "user_id": uid,
-                    "name": name[:120],
-                    "normalized_name": normalized,
-                    "source": str(row.get("source") or "resume_import")[:40],
-                }
-            ).execute()
-            existing_skills.add(normalized)
-            created["skills"] += 1
-        except Exception:
-            continue
+        skill_rows.append(
+            {
+                "user_id": uid,
+                "name": name[:120],
+                "normalized_name": normalized,
+                "source": str(row.get("source") or "resume_import")[:40],
+            }
+        )
+        existing_skills.add(normalized)
+    created["skills"] = insert_validated_batch(client, "candidate_skills", skill_rows)
 
     # --- experiences ---
     existing_exp = {
@@ -866,6 +899,7 @@ def apply_profile_from_resume(
         )
         for row in owned_rows(client, "candidate_experiences", user)
     }
+    experience_rows: list[dict[str, Any]] = []
     for index, row in enumerate(payload.experiences or []):
         if not _selected(row):
             continue
@@ -876,25 +910,22 @@ def apply_profile_from_resume(
         key = (_normalize_token(company), _normalize_token(role))
         if key in existing_exp:
             continue
-        try:
-            client.table("candidate_experiences").insert(
-                {
-                    "user_id": uid,
-                    "company_name": company[:200],
-                    "role_title": role[:200],
-                    "location": (str(row["location"]).strip()[:160] if row.get("location") else None),
-                    "employment_type": (
-                        str(row["employment_type"]).strip()[:80] if row.get("employment_type") else None
-                    ),
-                    "summary": (str(row["summary"]).strip()[:4000] if row.get("summary") else None),
-                    "is_current": bool(row.get("is_current")),
-                    "display_order": int(row.get("display_order") or index),
-                }
-            ).execute()
-            existing_exp.add(key)
-            created["experiences"] += 1
-        except Exception:
-            continue
+        experience_rows.append(
+            {
+                "user_id": uid,
+                "company_name": company[:200],
+                "role_title": role[:200],
+                "location": (str(row["location"]).strip()[:160] if row.get("location") else None),
+                "employment_type": (
+                    str(row["employment_type"]).strip()[:80] if row.get("employment_type") else None
+                ),
+                "summary": (str(row["summary"]).strip()[:4000] if row.get("summary") else None),
+                "is_current": bool(row.get("is_current")),
+                "display_order": int(row.get("display_order") or index),
+            }
+        )
+        existing_exp.add(key)
+    created["experiences"] = insert_validated_batch(client, "candidate_experiences", experience_rows)
 
     # --- education ---
     existing_edu = {
@@ -904,6 +935,7 @@ def apply_profile_from_resume(
         )
         for row in owned_rows(client, "candidate_education", user)
     }
+    education_rows: list[dict[str, Any]] = []
     for index, row in enumerate(payload.education or []):
         if not _selected(row):
             continue
@@ -914,29 +946,28 @@ def apply_profile_from_resume(
         key = (_normalize_token(institution), _normalize_token(degree or ""))
         if key in existing_edu:
             continue
-        try:
-            client.table("candidate_education").insert(
-                {
-                    "user_id": uid,
-                    "institution": institution[:200],
-                    "degree": degree[:160] if degree else None,
-                    "field_of_study": (
-                        str(row["field_of_study"]).strip()[:160] if row.get("field_of_study") else None
-                    ),
-                    "grade": (str(row["grade"]).strip()[:80] if row.get("grade") else None),
-                    "description": (str(row["description"]).strip()[:2000] if row.get("description") else None),
-                    "display_order": int(row.get("display_order") or index),
-                }
-            ).execute()
-            existing_edu.add(key)
-            created["education"] += 1
-        except Exception:
-            continue
+        education_rows.append(
+            {
+                "user_id": uid,
+                "institution": institution[:200],
+                "degree": degree[:160] if degree else None,
+                "field_of_study": (
+                    str(row["field_of_study"]).strip()[:160] if row.get("field_of_study") else None
+                ),
+                "grade": (str(row["grade"]).strip()[:80] if row.get("grade") else None),
+                "description": (str(row["description"]).strip()[:2000] if row.get("description") else None),
+                "display_order": int(row.get("display_order") or index),
+            }
+        )
+        existing_edu.add(key)
+    created["education"] = insert_validated_batch(client, "candidate_education", education_rows)
 
     # --- projects ---
     existing_projects = {
-        _normalize_token(str(row.get("title") or "")) for row in owned_rows(client, "candidate_projects", user)
+        _normalize_token(str(row.get("title") or ""))
+        for row in owned_rows(client, "candidate_projects", user)
     }
+    project_rows: list[dict[str, Any]] = []
     for index, row in enumerate(payload.projects or []):
         if not _selected(row):
             continue
@@ -946,27 +977,25 @@ def apply_profile_from_resume(
         key = _normalize_token(title)
         if key in existing_projects:
             continue
-        try:
-            client.table("candidate_projects").insert(
-                {
-                    "user_id": uid,
-                    "title": title[:200],
-                    "role": (str(row["role"]).strip()[:160] if row.get("role") else None),
-                    "description": (str(row["description"]).strip()[:4000] if row.get("description") else None),
-                    "skills": row.get("skills") if isinstance(row.get("skills"), list) else [],
-                    "display_order": int(row.get("display_order") or index),
-                }
-            ).execute()
-            existing_projects.add(key)
-            created["projects"] += 1
-        except Exception:
-            continue
+        project_rows.append(
+            {
+                "user_id": uid,
+                "title": title[:200],
+                "role": (str(row["role"]).strip()[:160] if row.get("role") else None),
+                "description": (str(row["description"]).strip()[:4000] if row.get("description") else None),
+                "skills": row.get("skills") if isinstance(row.get("skills"), list) else [],
+                "display_order": int(row.get("display_order") or index),
+            }
+        )
+        existing_projects.add(key)
+    created["projects"] = insert_validated_batch(client, "candidate_projects", project_rows)
 
     # --- certifications ---
     existing_certs = {
         _normalize_token(str(row.get("name") or ""))
         for row in owned_rows(client, "candidate_certifications", user)
     }
+    certification_rows: list[dict[str, Any]] = []
     for row in payload.certifications or []:
         if not _selected(row):
             continue
@@ -976,24 +1005,22 @@ def apply_profile_from_resume(
         key = _normalize_token(name)
         if key in existing_certs:
             continue
-        try:
-            client.table("candidate_certifications").insert(
-                {
-                    "user_id": uid,
-                    "name": name[:200],
-                    "issuer": (str(row["issuer"]).strip()[:160] if row.get("issuer") else None),
-                }
-            ).execute()
-            existing_certs.add(key)
-            created["certifications"] += 1
-        except Exception:
-            continue
+        certification_rows.append(
+            {
+                "user_id": uid,
+                "name": name[:200],
+                "issuer": (str(row["issuer"]).strip()[:160] if row.get("issuer") else None),
+            }
+        )
+        existing_certs.add(key)
+    created["certifications"] = insert_validated_batch(client, "candidate_certifications", certification_rows)
 
     # --- languages ---
     existing_langs = {
         str(row.get("normalized_language") or "").lower()
         for row in owned_rows(client, "candidate_languages", user)
     }
+    language_rows: list[dict[str, Any]] = []
     for index, row in enumerate(payload.languages or []):
         if not _selected(row):
             continue
@@ -1003,26 +1030,24 @@ def apply_profile_from_resume(
         normalized = _normalize_token(language)
         if not normalized or normalized in existing_langs:
             continue
-        try:
-            client.table("candidate_languages").insert(
-                {
-                    "user_id": uid,
-                    "language": language[:80],
-                    "normalized_language": normalized,
-                    "proficiency": (str(row["proficiency"]).strip()[:80] if row.get("proficiency") else None),
-                    "display_order": int(row.get("display_order") or index),
-                }
-            ).execute()
-            existing_langs.add(normalized)
-            created["languages"] += 1
-        except Exception:
-            continue
+        language_rows.append(
+            {
+                "user_id": uid,
+                "language": language[:80],
+                "normalized_language": normalized,
+                "proficiency": (str(row["proficiency"]).strip()[:80] if row.get("proficiency") else None),
+                "display_order": int(row.get("display_order") or index),
+            }
+        )
+        existing_langs.add(normalized)
+    created["languages"] = insert_validated_batch(client, "candidate_languages", language_rows)
 
     # --- links ---
     existing_links = {
         str(row.get("url") or "").strip().lower() for row in owned_rows(client, "candidate_links", user)
     }
     allowed_link_types = {"linkedin", "github", "portfolio", "website", "other"}
+    link_rows: list[dict[str, Any]] = []
     for index, row in enumerate(payload.links or []):
         if not _selected(row):
             continue
@@ -1032,20 +1057,17 @@ def apply_profile_from_resume(
             continue
         if url.lower() in existing_links:
             continue
-        try:
-            client.table("candidate_links").insert(
-                {
-                    "user_id": uid,
-                    "link_type": link_type,
-                    "url": url[:500],
-                    "label": (str(row["label"]).strip()[:120] if row.get("label") else None),
-                    "display_order": int(row.get("display_order") or index),
-                }
-            ).execute()
-            existing_links.add(url.lower())
-            created["links"] += 1
-        except Exception:
-            continue
+        link_rows.append(
+            {
+                "user_id": uid,
+                "link_type": link_type,
+                "url": url[:500],
+                "label": (str(row["label"]).strip()[:120] if row.get("label") else None),
+                "display_order": int(row.get("display_order") or index),
+            }
+        )
+        existing_links.add(url.lower())
+    created["links"] = insert_validated_batch(client, "candidate_links", link_rows)
 
     profile = recalculate_completion(client, user)
     write_activity(
@@ -1613,7 +1635,12 @@ def patch_jd_metadata(
         .data[0]
     )
     write_activity(
-        client, user, "job_description_updated", "Job description metadata updated", "job_description", str(jd_id)
+        client,
+        user,
+        "job_description_updated",
+        "Job description metadata updated",
+        "job_description",
+        str(jd_id),
     )
     return result
 
@@ -1874,7 +1901,10 @@ async def create_ats(
                         "focus_areas": brief.get("focus_areas") or [],
                         "inference_provider": brief.get("provider"),
                         "inference_model": brief.get("model"),
-                        "disclaimer": "Keyword coverage is not a hiring prediction. Do not add false experience.",
+                        "disclaimer": (
+                            "Keyword coverage is not a hiring prediction. "
+                            "Do not add false experience."
+                        ),
                     },
                     "completed_at": utc_now(),
                 }
@@ -1976,7 +2006,7 @@ def get_interview(
     session = owned_row(client, "interview_sessions", session_id, user)
     questions = (
         client.table("interview_questions")
-        .select("id,position,question,question_type,created_at")
+        .select("id,position,question,question_type,source_context,created_at")
         .eq("session_id", str(session_id))
         .eq("user_id", str(user.id))
         .order("position")
@@ -2099,7 +2129,7 @@ async def start_interview(
 
     questions = (
         client.table("interview_questions")
-        .select("id,position,question,question_type,created_at")
+        .select("id,position,question,question_type,source_context,created_at")
         .eq("session_id", str(session_id))
         .eq("user_id", str(user.id))
         .order("position")
@@ -2115,6 +2145,9 @@ async def start_interview(
         "questions": questions,
         "question_provider": questions_payload.get("provider"),
         "question_model": questions_payload.get("model"),
+        "agent": questions_payload.get("agent") or "interview_questions",
+        "fallback": bool(questions_payload.get("fallback")),
+        "fallback_reason": questions_payload.get("fallback_reason"),
     }
 
 

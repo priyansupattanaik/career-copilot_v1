@@ -10,6 +10,12 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from app.agents.llm.common import (
+    extract_message_content,
+    parse_json_object,
+    provider_error_detail,
+    strip_json_fence,
+)
 from app.config import Settings
 from app.errors import ApiError
 from app.schemas import ProviderSuggestionResult
@@ -30,6 +36,8 @@ class NvidiaClient:
             "configured": self.settings.nvidia_configured,
             "model": self.settings.nvidia_model or None,
             "prompt_version": self.settings.nvidia_prompt_version,
+            "base_url": self.settings.nvidia_base_url or None,
+            "provider": "nvidia",
         }
 
     async def generate(self, context: dict[str, Any]) -> ProviderSuggestionResult:
@@ -59,7 +67,7 @@ class NvidiaClient:
         raw = await self._request(payload)
         try:
             return self._parse(raw)
-        except (json.JSONDecodeError, ValidationError):
+        except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
             repair_prompt = (PROMPTS_DIR / "repair_structured_output_v1.txt").read_text(encoding="utf-8")
             repair_payload = {
                 **payload,
@@ -68,7 +76,8 @@ class NvidiaClient:
                     {
                         "role": "user",
                         "content": json.dumps(
-                            {"invalid_output": raw, "output_schema": schema}, separators=(",", ":")
+                            {"invalid_output": strip_json_fence(raw)[:12_000], "output_schema": schema},
+                            separators=(",", ":"),
                         ),
                     },
                 ],
@@ -76,7 +85,7 @@ class NvidiaClient:
             repaired = await self._request(repair_payload)
             try:
                 return self._parse(repaired)
-            except (json.JSONDecodeError, ValidationError) as exc:
+            except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
                 raise ApiError(
                     502,
                     "invalid_provider_response",
@@ -84,20 +93,11 @@ class NvidiaClient:
                 ) from exc
 
     def _parse(self, content: str) -> ProviderSuggestionResult:
-        if len(content) > 200_000 or content.lstrip().startswith("```"):
-            raise json.JSONDecodeError("Non-JSON provider output", content, 0)
-        return ProviderSuggestionResult.model_validate(json.loads(content))
+        data = parse_json_object(content)
+        return ProviderSuggestionResult.model_validate(data)
 
     def _strip_json_fence(self, content: str) -> str:
-        text = (content or "").strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        return text
+        return strip_json_fence(content)
 
     async def generate_structured(
         self,
@@ -133,10 +133,7 @@ class NvidiaClient:
         }
         raw = await self._request(payload)
         try:
-            cleaned = self._strip_json_fence(raw)
-            if len(cleaned) > 200_000:
-                raise json.JSONDecodeError("Provider output too large", cleaned, 0)
-            return schema_model.model_validate(json.loads(cleaned))
+            return schema_model.model_validate(parse_json_object(raw))
         except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
             repair_prompt = (PROMPTS_DIR / "repair_structured_output_v1.txt").read_text(encoding="utf-8")
             repair_payload = {
@@ -146,7 +143,7 @@ class NvidiaClient:
                     {
                         "role": "user",
                         "content": json.dumps(
-                            {"invalid_output": raw, "output_schema": schema},
+                            {"invalid_output": strip_json_fence(raw)[:12_000], "output_schema": schema},
                             separators=(",", ":"),
                         ),
                     },
@@ -154,8 +151,7 @@ class NvidiaClient:
             }
             repaired = await self._request(repair_payload)
             try:
-                cleaned = self._strip_json_fence(repaired)
-                return schema_model.model_validate(json.loads(cleaned))
+                return schema_model.model_validate(parse_json_object(repaired))
             except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
                 raise ApiError(
                     502,
@@ -192,7 +188,7 @@ class NvidiaClient:
                     raise ApiError(
                         503,
                         "nvidia_authentication_failed",
-                        "The AI improvement provider is not configured correctly.",
+                        "The AI improvement provider is not configured correctly. Check NVIDIA_API_KEY.",
                     )
                 if response.status_code == 429:
                     raise ApiError(
@@ -201,12 +197,14 @@ class NvidiaClient:
                 if response.status_code >= 500:
                     raise ApiError(503, "nvidia_unavailable", "The AI provider is temporarily unavailable.")
                 if response.status_code >= 400:
-                    raise ApiError(
-                        502, "nvidia_request_rejected", "The AI provider rejected the improvement request."
-                    )
+                    detail = provider_error_detail(response.text)
+                    message = "The AI provider rejected the improvement request."
+                    if detail:
+                        message = f"{message} ({detail})"
+                    raise ApiError(502, "nvidia_request_rejected", message)
                 try:
                     body = response.json()
-                    content = body["choices"][0]["message"]["content"]
+                    content = extract_message_content(body)
                 except (ValueError, KeyError, IndexError, TypeError) as exc:
                     raise ApiError(
                         502, "nvidia_response_unreadable", "The AI provider response could not be read."
