@@ -22,9 +22,20 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
+  // Load once per shell mount — re-fetching on every route change made the UI feel sticky/laggy.
   useEffect(() => {
-    apiRequest<Bootstrap>("/me/bootstrap").then(setBootstrap).catch(() => setBootstrap(null));
-  }, [pathname]);
+    let active = true;
+    apiRequest<Bootstrap>("/me/bootstrap")
+      .then((data) => {
+        if (active) setBootstrap(data);
+      })
+      .catch(() => {
+        if (active) setBootstrap(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     document.body.style.overflow = open ? "hidden" : "";
     return () => {
@@ -90,12 +101,12 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           </button>
           <strong className="app-header-title">Career Copilot</strong>
           <div className="app-header-actions">
-            <span className="badge badge-success">Connected workspace</span>
+            <span className="badge badge-success">Signed in</span>
             <button className="icon-button" aria-label={`${bootstrap?.unread_notification_count || 0} unread notifications`}>
               <Bell />
             </button>
-            <div style={{ position: "relative" }}>
-              <button className="avatar" onClick={() => setProfileMenu(!profileMenu)} aria-expanded={profileMenu}>
+            <div className="profile-menu-wrap">
+              <button className="avatar" onClick={() => setProfileMenu(!profileMenu)} aria-label="Open profile menu" aria-expanded={profileMenu} aria-haspopup="menu">
                 {avatarUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={avatarUrl} alt="" className="avatar-image" />
@@ -104,7 +115,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 )}
               </button>
               {profileMenu && (
-                <div className="panel stack" style={{ position: "absolute", right: 0, top: 52, width: 220, zIndex: 80 }}>
+                <div className="panel stack profile-menu" role="menu">
                   <Link href="/settings/profile">View profile</Link>
                   <Link href="/settings/account">Account settings</Link>
                   <button className="button button-secondary" onClick={logout}>

@@ -662,14 +662,13 @@ export function ProfileSettings() {
             .map(([k, n]) => `${n} ${k}`)
             .join(", ")
         : "";
-      const engine = result.ai_used ? "AI + rules" : "rules only";
       const fields = (result as { fields_extracted?: Record<string, unknown> }).fields_extracted;
       const profileFields = Array.isArray(fields?.profile) ? (fields.profile as string[]).join(", ") : "";
       setMessage(
         [
-          countText ? `Draft ready (${engine}): ${countText}.` : `Draft ready (${engine}).`,
+          countText ? `Draft ready: ${countText}.` : "Draft ready.",
           profileFields ? `Profile fields: ${profileFields}.` : "",
-          "Review and apply below.",
+          "Review and apply only what is true for you.",
         ]
           .filter(Boolean)
           .join(" "),
@@ -697,11 +696,7 @@ export function ProfileSettings() {
       }>("/profile/from-resume/preview-upload", { method: "POST", body: formData });
       setDraft(result.draft);
       setDraftDisclaimer(result.disclaimer || "");
-      setMessage(
-        result.ai_used
-          ? "Draft built with AI structured extraction. Review and apply below."
-          : "Draft built with rule-based extraction (AI not configured or unavailable). Review and apply below.",
-      );
+      setMessage("Draft ready from your resume. Review and apply only what is true for you.");
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1010,7 +1005,7 @@ export function ProfileSettings() {
   return (
     <Frame
       title="Candidate profile"
-      description="All edits are saved to your private Supabase account. Limited-choice fields use menus so values stay consistent."
+      description="All edits are saved to your private account. Limited-choice fields use menus so values stay consistent."
     >
       {loading ? (
         <Card>
@@ -1025,7 +1020,7 @@ export function ProfileSettings() {
           <Card className="stack panel-blue">
             <h2 style={{ margin: 0 }}>Fill profile from resume</h2>
             <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
-              Upload a resume or pick one already saved. When NVIDIA AI is configured, we use structured AI extraction
+              Upload a resume or pick one already saved. When AI is available, we use structured extraction
               plus rules for better accuracy. You always review before anything is saved.
             </p>
             <div className="grid-2">
@@ -1192,7 +1187,7 @@ export function ProfileSettings() {
           <Card className="stack">
             <h2 style={{ margin: 0 }}>Profile picture</h2>
             <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
-              JPEG, PNG, or WebP · maximum 3 MB. Stored privately in your Supabase account.
+              JPEG, PNG, or WebP · maximum 3 MB. Stored privately in your account.
             </p>
             <div className="row" style={{ justifyContent: "flex-start", gap: 16, alignItems: "center" }}>
               <div className="profile-avatar-preview" aria-hidden={!form.avatar_url}>
@@ -1752,7 +1747,7 @@ export function AccountSettings() {
     (!accountEmail || confirmEmail.trim().toLowerCase() === accountEmail.toLowerCase());
 
   return (
-    <Frame title="Account & access" description="Supabase Auth manages sign-in and password recovery.">
+    <Frame title="Account & access" description="Sign-in and password recovery are managed securely for your account.">
       <Card className="stack">
         <h2 style={{ margin: 0 }}>Session</h2>
         {accountEmail ? (
@@ -1783,7 +1778,7 @@ export function AccountSettings() {
       <Card className="stack" style={{ borderColor: "color-mix(in srgb, var(--danger) 45%, var(--border))" }}>
         <h2 style={{ margin: 0 }}>Delete account</h2>
         <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
-          Permanently removes your auth account and all candidate data stored in Supabase: profile, skills, experience,
+          Permanently removes your account and all candidate data stored with us: profile, skills, experience,
           education, resumes and files, job descriptions, ATS analyses, interviews, learning paths, saved jobs,
           activity, and preferences. This cannot be undone.
         </p>
@@ -1837,7 +1832,7 @@ export function AccountSettings() {
               </p>
             )}
             <p className="muted" style={{ margin: 0, fontSize: "var(--text-xs)" }}>
-              Requires the API <code>SUPABASE_SECRET_KEY</code> so the server can delete the Auth user (DB rows cascade).
+              Account deletion is permanent. Make sure you really want to remove everything.
             </p>
           </div>
         )}
@@ -1917,7 +1912,7 @@ export function PreferenceSettings() {
 
 export function PrivacySettings() {
   return (
-    <Frame title="Privacy controls" description="Consent and visibility choices are persisted with row-level ownership.">
+    <Frame title="Privacy controls" description="Consent and visibility choices are saved to your private account.">
       <StoredSettings kind="privacy" />
     </Frame>
   );

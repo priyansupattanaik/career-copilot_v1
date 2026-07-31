@@ -115,8 +115,8 @@ export function Dashboard() {
       .then(setData)
       .catch((e: Error) => {
         setError(e.message);
-        if (/supabase|configured|session/i.test(e.message)) {
-          setConfigHint("Check root .env Supabase values and that migrations are applied.");
+        if (/configured|session|unavailable|sign-in/i.test(e.message)) {
+          setConfigHint("If this keeps happening, sign out and sign back in, or try again later.");
         }
       });
   }, []);
@@ -135,7 +135,7 @@ export function Dashboard() {
       <PageHeader
         eyebrow="Career workspace"
         title={`Welcome, ${first}.`}
-        description="Counts and status below come from your persisted Supabase records."
+        description="A live snapshot of your profile, analyses, interviews, and recent activity."
         action={
           <Link className="button button-primary" href="/resume-analysis?tab=upload">
             New ATS analysis
@@ -168,7 +168,7 @@ export function Dashboard() {
         <Card>
           <span className="mono">Interviews</span>
           <div className="metric-value">{data?.counts.interviews ?? "—"}</div>
-          <p>{data?.capabilities.interview_evaluation === false ? "Evaluation unavailable" : "Persisted sessions"}</p>
+          <p>{data?.capabilities.interview_evaluation === false ? "Practice mode" : "Your sessions"}</p>
         </Card>
         <Card>
           <span className="mono">Saved jobs</span>
