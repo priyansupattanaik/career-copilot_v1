@@ -1,6 +1,5 @@
 "use client";
 import dynamic from "next/dynamic";
-import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowRight, BookOpenCheck, BriefcaseBusiness, FileSearch, Menu, ShieldCheck, Sparkles, X } from "lucide-react";
@@ -47,7 +46,6 @@ export function LandingPage() {
       <nav className="marketing-nav" aria-label="Primary">
         <div className="container nav-inner">
           <Link className="brand" href="/" onClick={closeDrawer}>
-            <Image src="/brand/logo-mark.svg" width={40} height={40} alt="" />
             Career Copilot
           </Link>
           <div className="nav-links">
@@ -173,7 +171,6 @@ export function LandingPage() {
       <footer className="footer">
         <div className="container row">
           <div className="brand">
-            <Image src="/brand/logo-mark.svg" width={38} height={38} alt="" />
             Career Copilot
           </div>
           <div className="cluster">

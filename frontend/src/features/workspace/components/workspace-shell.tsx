@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -208,7 +207,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       <aside className={`sidebar ${open ? "open" : ""}`} aria-label="Workspace navigation">
         <div className="row">
           <Link className="brand" href="/" onClick={() => setOpen(false)}>
-            <Image src="/brand/logo-mark.svg" width={38} height={38} alt="" />
             Career Copilot
           </Link>
           {open && (

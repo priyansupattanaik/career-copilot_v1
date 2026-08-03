@@ -109,7 +109,7 @@ Many tools either invent “AI career content,” hide how scores are computed, 
 | **npm scripts** | Install, dev (API + UI), env checks, secret scan |
 | **Node.js** | Frontend tooling and orchestration scripts under `scripts/` |
 | **ESLint + TypeScript** | Frontend quality gates |
-| **pytest-style tests** under `tests/ats_scoring/` | ATS scoring unit tests |
+| **pytest-style tests** under `backend/tests/` | ATS scoring unit tests |
 
 ### Optional extras
 
@@ -459,10 +459,10 @@ composite = 0.40 * hard_skill_match
 copy .env.example .env
 # Edit .env: set AUTH_SECRET and any API keys you need
 
-npm install
+npm run setup
 ```
 
-`postinstall` runs:
+`npm run setup` installs the frontend from `frontend/package-lock.json`, then runs:
 
 - `scripts/setup/backend.mjs` — create `backend/.venv`, install `career-copilot-api` (and CrewAI when possible)
 - `scripts/setup/local-db.mjs` — apply schema / storage dirs
@@ -472,7 +472,7 @@ If multiple Pythons are installed:
 ```powershell
 $env:CAREER_COPILOT_PYTHON = "C:\Path\To\Python312\python.exe"
 $env:CAREER_COPILOT_RECREATE_VENV = "1"
-npm install
+npm run setup
 ```
 
 ### Run (full stack)
@@ -499,14 +499,14 @@ npm run dev:backend
 Production-style frontend:
 
 ```powershell
-npm run build
-npm run start
+npm run build:frontend
+npm --prefix frontend run start
 ```
 
 API alone:
 
 ```powershell
-uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
 ```
 
 ### Useful npm scripts
@@ -517,12 +517,16 @@ uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
 | `npm run db:setup` | Schema apply + DB check only |
 | `npm run check:env` | Env presence (values not printed) |
 | `npm run check:secrets` | Secret leak scan |
-| `npm run lint` / `typecheck` / `build` | Frontend quality |
-| `npm run check` | secrets + env + frontend checks |
+| `npm run lint` | Frontend ESLint |
+| `npm run typecheck` | Frontend TypeScript |
+| `npm run build:frontend` | Frontend production build |
+| `npm run check:frontend` | Frontend lint + typecheck + build |
+| `npm run check:boundaries` | Cross-directory import check |
+| `npm run test:backend` | Backend pytest suite |
 
 ### Complete `.env.example`
 
-Copy to root `.env`. Values below match the checked-in template and the settings fields consumed by `backend/app/config.py` / scripts. **Never** put secrets in `NEXT_PUBLIC_*` variables.
+Copy to root `.env`. Values below match the checked-in template and the settings fields consumed by `backend/app/core/config.py` / scripts. **Never** put secrets in `NEXT_PUBLIC_*` variables.
 
 ```env
 # One repository-wide environment file.
@@ -585,7 +589,8 @@ IMPROVEMENT_MAX_JD_CHARS=12000                     # Max JD characters attached 
 
 | Package | Version | Role |
 |---------|---------|------|
-| `career-copilot` (npm) | 1.0.0 | Frontend + scripts |
+| `career-copilot` (root npm) | 1.0.0 | Root orchestration only |
+| `career-copilot` (frontend npm) | 1.0.0 | Next.js frontend |
 | `career-copilot-api` (Python) | 1.0.0 | FastAPI app under `backend/app` |
 
 ### High-level layout
@@ -597,12 +602,24 @@ career-copilot_v1/
 ├── package.json
 ├── scripts/                 # setup, dev, migrate, env verify
 ├── db/schema.sql            # SQLite schema
-├── src/                     # Next.js App Router UI
+├── frontend/
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── src/
+│   └── public/
 ├── backend/
 │   ├── pyproject.toml
-│   └── app/                 # FastAPI: routes, agents, ATS, auth, DB
-└── tests/ats_scoring/       # Structured ATS unit tests
+│   ├── app/                 # FastAPI: routes, agents, ATS, auth, DB
+│   └── tests/               # Backend unit tests
+├── .data/                   # SQLite and local storage
+└── .env                     # Single runtime environment file
 ```
+
+### Current repository separation
+
+The repository root contains orchestration scripts, the single `.env`, `db/schema.sql`, and `.data/` runtime data. The Next.js application and its dependencies are contained in `frontend/`. The FastAPI application, Python environment, package metadata, and backend tests are contained in `backend/`. Root `tests/e2e/` is reserved for cross-stack browser tests; no such tests are currently present.
+
+Use `npm run setup` for a clean setup, `npm run dev` for combined startup, `npm run dev:frontend` or `npm run dev:backend` for independent services, `npm run lint`, `npm run typecheck`, `npm run test:backend`, `npm run build:frontend`, and `npm run check:boundaries` for verification. The frontend has no unit-test files currently, so a frontend test command is `NOT PRESENT` rather than simulated.
 
 ### Security notes
 

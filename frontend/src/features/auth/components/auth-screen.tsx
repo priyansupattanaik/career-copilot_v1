@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
@@ -13,7 +12,6 @@ function Shell({ children, title, description }: { children: React.ReactNode; ti
     <main id="main-content" className="auth-shell">
       <aside className="auth-aside">
         <Link className="brand" href="/">
-          <Image src="/brand/logo-mark.svg" width={42} height={42} alt="" />
           Career Copilot
         </Link>
         <div>
