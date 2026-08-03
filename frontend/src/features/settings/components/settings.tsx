@@ -486,7 +486,7 @@ function MultiOptionGroup({
 
   return (
     <fieldset className="stack" style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 14, margin: 0, gap: 10 }}>
-      <legend style={{ padding: "0 6px", fontWeight: 700 }}>
+      <legend style={{ padding: "0 6px", fontWeight: 600 }}>
         {legend}
         {required ? <RequiredMark /> : null}
       </legend>
@@ -569,7 +569,7 @@ function MultiOptionGroup({
               <button
                 type="button"
                 className="button-quiet"
-                style={{ minHeight: "auto", padding: 0, boxShadow: "none", border: "none", fontWeight: 700 }}
+                style={{ minHeight: "auto", padding: 0, boxShadow: "none", border: "none", fontWeight: 600 }}
                 onClick={() => removeValue(value)}
                 aria-label={`Remove ${labelByValue.get(value) || value}`}
               >
@@ -1238,7 +1238,7 @@ export function ProfileSettings() {
             <Progress value={completion} label="Profile completion" />
             {!profileComplete && missingFromDetails.length > 0 ? (
               <div className="stack" style={{ gap: 6 }}>
-                <p style={{ margin: 0, fontWeight: 650 }}>Still needed to complete your profile</p>
+                <p style={{ margin: 0, fontWeight: 600 }}>Still needed to complete your profile</p>
                 <ul style={{ margin: 0, paddingLeft: 18 }}>
                   {missingFromDetails.map((item) => (
                     <li key={item.key}>

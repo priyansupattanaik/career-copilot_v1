@@ -53,7 +53,7 @@ career-copilot_v1/
 │   └── shared/load-env.mjs
 ├── frontend/                 # Next.js App Router application
 │   ├── package.json
-│   ├── public/               # fonts, jobs textures (no brand logo)
+│   ├── public/               # jobs textures (no brand logo; fonts via next/font)
 │   └── src/
 │       ├── app/              # routes, API proxies, globals.css
 │       ├── features/         # domain UI (auth, resume, interview, …)
@@ -92,8 +92,9 @@ career-copilot_v1/
 | **Lucide React** | Icons |
 | **Motion** | Light animation |
 | **Three.js / React Three Fiber / Drei** | Jobs/marketing globe |
-| **Space Grotesk + IBM Plex Mono** (`@fontsource-*`) | UI fonts |
-| **Satoshi** (local `public/fonts/satoshi`) | Additional typeface assets |
+| **Source Sans 3** (`next/font`) | Site-wide UI / body |
+| **Source Serif 4** (`next/font`) | Headings, brand, display |
+| **Source Code Pro** (`next/font`) | Scores, badges, mono labels |
 
 ### Backend
 

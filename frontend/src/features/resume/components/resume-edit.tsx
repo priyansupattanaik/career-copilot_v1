@@ -184,7 +184,7 @@ function LiveResumePaper({
       {headerLines.filter(Boolean).length ? (
         <section className="resume-paper-section">
           {headerLines.filter(Boolean).map((line, i) => (
-            <p key={`h-${i}`} style={{ margin: "0 0 4px", fontWeight: i === 0 ? 700 : 400 }}>
+            <p key={`h-${i}`} style={{ margin: "0 0 4px", fontWeight: i === 0 ? 600 : 400 }}>
               {highlightKeywords(line, highlightTerms)}
             </p>
           ))}

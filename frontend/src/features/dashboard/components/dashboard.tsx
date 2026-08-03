@@ -108,11 +108,11 @@ function ActionRow({
           </p>
           {value ? (
             href ? (
-              <Link href={href} style={{ fontWeight: 650 }}>
+              <Link href={href} style={{ fontWeight: 600 }}>
                 {value}
               </Link>
             ) : (
-              <p style={{ margin: 0, color: "var(--ink)", fontWeight: 650 }}>{value}</p>
+              <p style={{ margin: 0, color: "var(--ink)", fontWeight: 600 }}>{value}</p>
             )
           ) : (
             <p style={{ margin: 0 }}>{empty}</p>

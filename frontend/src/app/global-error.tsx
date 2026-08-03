@@ -7,7 +7,7 @@ export default function GlobalError({ reset }: { error: Error & { digest?: strin
         style={{
           margin: 0,
           minHeight: "100vh",
-          fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif",
+          fontFamily: '"Source Sans 3", "Segoe UI", system-ui, sans-serif',
           background: "#f5faff",
           color: "#102a43",
         }}
@@ -39,11 +39,20 @@ export default function GlobalError({ reset }: { error: Error & { digest?: strin
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
                 color: "#526b80",
+                fontFamily: '"Source Code Pro", ui-monospace, monospace',
               }}
             >
               Application error
             </p>
-            <h1 style={{ margin: "0 0 12px", fontSize: "1.5rem", lineHeight: 1.2 }}>
+            <h1
+              style={{
+                margin: "0 0 12px",
+                fontSize: "1.5rem",
+                lineHeight: 1.2,
+                fontFamily: '"Source Serif 4", Georgia, serif',
+                fontWeight: 600,
+              }}
+            >
               Career Copilot hit an unexpected problem.
             </h1>
             <p style={{ margin: "0 0 20px", color: "#526b80" }}>
@@ -59,7 +68,7 @@ export default function GlobalError({ reset }: { error: Error & { digest?: strin
                 borderRadius: 12,
                 background: "#1769aa",
                 color: "#ffffff",
-                fontWeight: 650,
+                fontWeight: 600,
                 cursor: "pointer",
               }}
             >
