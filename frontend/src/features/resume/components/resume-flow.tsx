@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import { BriefcaseBusiness, CheckCircle2, FileText, RotateCcw, ShieldCheck } from "lucide-react";
 import { Badge, Button, Card, Input, PageHeader, Progress, Textarea } from "@/shared/ui/primitives";
 import { apiRequest } from "@/shared/api/client";
 import { isValidCareerFile } from "@/shared/utils";
@@ -43,9 +44,14 @@ type Analysis = {
   overall_score: number | null;
   score_breakdown?: {
     matched_terms?: string[];
+    partial_terms?: string[];
     missing_terms?: string[];
     total_terms?: number;
     method?: string;
+    required_score?: number;
+    preferred_score?: number;
+    section_summary?: Record<string, string[]>;
+    keyword_coverage_score?: number;
     structured_parameter_scores?: Record<string, number> | null;
     domain_gate?: { decision?: "ALLOW" | "REJECT"; reason?: string } | null;
   };
@@ -56,8 +62,17 @@ type Analysis = {
     missing?: number;
     total?: number;
     missing_terms?: string[];
+    partial_terms?: string[];
+    critical_missing?: string[];
+    preferred_missing?: string[];
+    required_score?: number;
+    preferred_score?: number;
+    section_summary?: Record<string, string[]>;
     overall_inference?: string;
     focus_areas?: string[];
+    priority_actions?: string[];
+    section_guidance?: string[];
+    do_not_claim?: string[];
     inference_provider?: string;
     structured_composite_score?: number | null;
     structured_parameter_scores?: Record<string, number> | null;
@@ -503,6 +518,20 @@ function AtsHistoryList() {
           {message}
         </p>
       )}
+      <div className="analysis-overview" aria-label="ATS analysis summary">
+        <div>
+          <span className="analysis-overview-value">{analyses.length}</span>
+          <span className="analysis-overview-label">Total analyses</span>
+        </div>
+        <div>
+          <span className="analysis-overview-value">{analyses.filter((item) => item.status === "completed").length}</span>
+          <span className="analysis-overview-label">Completed</span>
+        </div>
+        <div>
+          <span className="analysis-overview-value">{analyses.filter((item) => item.status !== "completed").length}</span>
+          <span className="analysis-overview-label">Needs attention</span>
+        </div>
+      </div>
       {!analyses.length ? (
         <Card className="empty-state">
           <h2>No ATS analyses yet</h2>
@@ -564,12 +593,11 @@ function SectionEntries({ lines }: { lines: string[] }) {
     return <p style={{ margin: "6px 0 0" }}>No content extracted for this section.</p>;
   }
   return (
-    <div className="stack" style={{ gap: 10, marginTop: 6 }}>
+    <div className="extraction-entries">
       {lines.map((entry, index) => (
         <div
           key={`${index}-${entry.slice(0, 24)}`}
-          className="suggestion"
-          style={{ whiteSpace: "pre-wrap", margin: 0 }}
+          className="extraction-entry"
         >
           {entry}
         </div>
@@ -590,26 +618,46 @@ function ExtractionPanel({
   fallbackText?: string;
 }) {
   const entries = Object.entries(sections || {});
+  const contentCount = entries.reduce((total, [, lines]) => total + lines.length, 0);
+  const isResume = title.toLowerCase().startsWith("resume");
   return (
-    <Card className="stack">
-      <div className="row">
-        <h2 style={{ margin: 0 }}>{title}</h2>
+    <Card className="extraction-card">
+      <div className="extraction-card-header">
+        <div className="extraction-card-title">
+          <span className="extraction-icon" aria-hidden="true">
+            {isResume ? <FileText size={18} strokeWidth={2.2} /> : <BriefcaseBusiness size={18} strokeWidth={2.2} />}
+          </span>
+          <div>
+            <p className="extraction-kicker">{isResume ? "Candidate document" : "Target role"}</p>
+            <h2>{title.replace(/^Resume · |^Job description · /, "")}</h2>
+          </div>
+        </div>
         <Badge tone={status === "confirmed" ? "success" : "warning"}>{status}</Badge>
       </div>
+      <div className="extraction-card-meta">
+        <span>{entries.length ? `${entries.length} sections` : "Raw text"}</span>
+        <span aria-hidden="true">·</span>
+        <span>{contentCount ? `${contentCount} extracted entries` : "Needs review"}</span>
+      </div>
       {entries.length ? (
-        entries.map(([section, lines]) => (
-          <div key={section}>
-            <strong style={{ textTransform: "capitalize" }}>{section.replaceAll("_", " ")}</strong>
+        <div className="extraction-sections">
+          {entries.map(([section, lines]) => (
+            <section className="extraction-section" key={section}>
+              <div className="extraction-section-heading">
+                <h3>{section.replaceAll("_", " ")}</h3>
+                <span>{lines.length}</span>
+              </div>
             <SectionEntries lines={lines} />
-          </div>
-        ))
+            </section>
+          ))}
+        </div>
       ) : fallbackText ? (
-        <p style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+        <p className="extraction-fallback">
           {fallbackText.slice(0, 2500)}
           {fallbackText.length > 2500 ? "…" : ""}
         </p>
       ) : (
-        <p style={{ margin: 0 }}>No extracted content available yet.</p>
+        <p className="extraction-empty">No extracted content available yet.</p>
       )}
     </Card>
   );
@@ -849,11 +897,15 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
       )}
 
       {step === "review" && resumeVersion && job && (
-        <div className="stack">
-          <div className="row">
+        <div className="review-workspace">
+          <div className="review-hero">
             <div>
-              <p className="eyebrow">Review extractions</p>
-              <h2 style={{ margin: 0 }}>Confirm extracted resume and JD</h2>
+              <div className="review-title-row">
+                <span className="review-step-marker">02</span>
+                <p className="eyebrow">Review before scoring</p>
+              </div>
+              <h2>Confirm your analysis inputs</h2>
+              <p>Check that the extracted content matches the files you supplied. Your ATS score will use only the confirmed data shown here.</p>
             </div>
             <Button
               variant="secondary"
@@ -862,11 +914,17 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
                 setReviewed(false);
               }}
             >
-              Back to upload
+              <RotateCcw size={16} aria-hidden="true" />
+              Change files
             </Button>
           </div>
 
-          <div className="grid-2">
+          <div className="review-trust-strip">
+            <div><ShieldCheck size={18} aria-hidden="true" /><span><strong>Evidence-first scoring</strong><small>No unsupported experience is added.</small></span></div>
+            <div><CheckCircle2 size={18} aria-hidden="true" /><span><strong>Two inputs ready</strong><small>Resume and job description are saved.</small></span></div>
+          </div>
+
+          <div className="review-document-grid">
             <ExtractionPanel
               title={`Resume · ${resume?.title || "Uploaded resume"}`}
               status={resumeVersion.extraction_status}
@@ -880,19 +938,22 @@ export function NewAnalysis({ embedded = false }: { embedded?: boolean }) {
             />
           </div>
 
-          <Card className="stack">
-            <label>
+          <div className="review-confirm-bar">
+            <label className="review-confirm-check">
               <input
                 type="checkbox"
                 checked={reviewed}
                 onChange={(event) => setReviewed(event.target.checked)}
               />{" "}
-              I reviewed the extracted resume and job description and confirm they can be used for ATS keyword coverage.
+              <span>
+                <strong>I reviewed both documents</strong>
+                <small>I confirm this extracted content can be used for ATS keyword coverage.</small>
+              </span>
             </label>
             <Button disabled={busy || !reviewed} onClick={runAnalysis}>
               {busy ? "Calculating…" : "Confirm inputs and calculate ATS score"}
             </Button>
-          </Card>
+          </div>
         </div>
       )}
     </>
@@ -959,6 +1020,7 @@ export function AtsReport() {
   }
 
   const missing = evidence.filter((item) => item.match_status === "not_found");
+  const partial = evidence.filter((item) => item.match_status === "partial_match");
   const missingTerms =
     analysis.summary?.missing_terms?.length
       ? analysis.summary.missing_terms
@@ -969,6 +1031,13 @@ export function AtsReport() {
   const matchedCount = analysis.summary?.matched ?? Math.max(0, total - missingTerms.length);
   const overallInference = analysis.summary?.overall_inference || "";
   const focusAreas = analysis.summary?.focus_areas || [];
+  const priorityActions = analysis.summary?.priority_actions || [];
+  const sectionGuidance = analysis.summary?.section_guidance || [];
+  const doNotClaim = analysis.summary?.do_not_claim || [];
+  const criticalMissing = analysis.summary?.critical_missing || missingTerms;
+  const preferredMissing = analysis.summary?.preferred_missing || [];
+  const partialTerms = analysis.summary?.partial_terms || analysis.score_breakdown?.partial_terms || partial.map((item) => item.requirement_text);
+  const keywordScore = analysis.score_breakdown?.keyword_coverage_score;
   const structuredScores =
     analysis.summary?.structured_parameter_scores || analysis.score_breakdown?.structured_parameter_scores || null;
   const domainGate = analysis.summary?.domain_gate || analysis.score_breakdown?.domain_gate || null;
@@ -1015,6 +1084,12 @@ export function AtsReport() {
       </Card>
       <Card className="stack panel-blue">
         <Progress value={analysis.overall_score || 0} label={structuredScoring ? "ATS composite score" : "JD keyword coverage"} />
+        {structuredScoring && keywordScore != null ? (
+          <div className="grid-2">
+            <div><strong>Keyword coverage</strong><p style={{ margin: "6px 0 0", fontSize: "var(--text-xl)" }}>{Math.round(keywordScore)}/100</p></div>
+            <div><strong>Structured composite</strong><p style={{ margin: "6px 0 0", fontSize: "var(--text-xl)" }}>{Math.round(analysis.overall_score || 0)}/100</p></div>
+          </div>
+        ) : null}
         <p>
           <strong>{missingTerms.length}</strong> missing of <strong>{total || "—"}</strong> scored terms
           {matchedCount != null ? ` (${matchedCount} matched)` : ""}.
@@ -1040,18 +1115,37 @@ export function AtsReport() {
         </Card>
       ) : null}
       <Card className="stack">
-        <h2 style={{ margin: 0 }}>Missing keywords</h2>
+        <h2 style={{ margin: 0 }}>Requirement gaps</h2>
+        {criticalMissing.length ? (
+          <div className="stack" style={{ gap: 8 }}>
+            <strong>Critical / required</strong>
+            <div className="cluster" style={{ gap: 8 }}>{criticalMissing.map((term) => <Link key={`critical-${term}`} className="badge badge-warning" href={`/resume-analysis/report/${params.reportId}/edit#resume-section-skills`}>{term}</Link>)}</div>
+          </div>
+        ) : null}
+        {preferredMissing.length ? (
+          <div className="stack" style={{ gap: 8 }}>
+            <strong>Preferred</strong>
+            <div className="cluster" style={{ gap: 8 }}>{preferredMissing.map((term) => <Link key={`preferred-${term}`} className="badge badge-info" href={`/resume-analysis/report/${params.reportId}/edit#resume-section-skills`}>{term}</Link>)}</div>
+          </div>
+        ) : null}
+        {partialTerms.length ? (
+          <div className="stack" style={{ gap: 8 }}>
+            <strong>Partial evidence</strong>
+            <div className="cluster" style={{ gap: 8 }}>{partialTerms.map((term) => <Link key={`partial-${term}`} className="badge badge-info" href={`/resume-analysis/report/${params.reportId}/edit#resume-section-skills`}>{term}</Link>)}</div>
+          </div>
+        ) : null}
+        {!criticalMissing.length && !preferredMissing.length && !partialTerms.length ? (
+          <p style={{ margin: 0 }}>No scored JD requirements are missing.</p>
+        ) : null}
         {missingTerms.length ? (
           <div className="cluster" style={{ gap: 8 }}>
             {missingTerms.map((term) => (
-              <Badge key={term} tone="warning">
+              <Badge key={`missing-${term}`} tone="warning">
                 {term}
               </Badge>
             ))}
           </div>
-        ) : (
-          <p style={{ margin: 0 }}>No scored JD terms are missing.</p>
-        )}
+        ) : null}
         <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
           Next: open the editor to add only true keywords, rewrite sections, apply AI suggestions, export PDF/DOCX, then
           re-run ATS against this job description.
@@ -1083,6 +1177,9 @@ export function AtsReport() {
             </ul>
           </div>
         ) : null}
+        {priorityActions.length > 0 ? <div className="stack" style={{ gap: 6 }}><strong>Priority actions</strong><ul style={{ margin: 0, paddingLeft: 18 }}>{priorityActions.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+        {sectionGuidance.length > 0 ? <div className="stack" style={{ gap: 6 }}><strong>Section guidance</strong><ul style={{ margin: 0, paddingLeft: 18 }}>{sectionGuidance.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
+        {doNotClaim.length > 0 ? <div className="stack" style={{ gap: 6 }}><strong>Evidence safeguards</strong><ul style={{ margin: 0, paddingLeft: 18 }}>{doNotClaim.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
 
       </Card>
       <Card>

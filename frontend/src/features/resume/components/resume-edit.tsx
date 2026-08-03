@@ -745,7 +745,7 @@ export function AtsResumeEdit() {
             const lines = entries[section] || [];
             const isSkills = section === "skills";
             return (
-              <Card className="stack" key={section}>
+              <Card className="stack" key={section} id={`resume-section-${section}`}>
                 <div className="row" style={{ justifyContent: "space-between" }}>
                   <h2 style={{ margin: 0, textTransform: "capitalize" }}>
                     {section.replaceAll("_", " ")}

@@ -1,7 +1,7 @@
 import unittest
 
-from app.agents.ats_scoring.crew import evaluate_domain_gate
-from app.ats.scoring.schemas import JDParsed, ExperienceEntry, ResumeParsed
+from app.features.ats.agent.crew import evaluate_domain_gate
+from app.features.ats.scoring.schemas import JDParsed, ExperienceEntry, ResumeParsed
 
 
 def it_resume() -> ResumeParsed:

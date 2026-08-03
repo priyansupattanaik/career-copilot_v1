@@ -3,8 +3,8 @@ import unittest
 from types import SimpleNamespace
 
 from app.core.config import Settings
-from app.db.client import LocalStorage
-from app.profiles.avatars import attach_avatar_url
+from app.database.client import LocalStorage
+from app.features.profile.avatars import attach_avatar_url
 
 
 class AvatarStorageTests(unittest.TestCase):

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { BookOpenCheck, BriefcaseBusiness, FileSearch, Gauge, Menu, Mic2, Settings, X } from "lucide-react";
+import { BookOpenCheck, BriefcaseBusiness, FileSearch, Gauge, Menu, Mic2, PanelLeftClose, PanelLeftOpen, Settings, X } from "lucide-react";
 import { routes } from "@/shared/routes";
 import { createClient } from "@/features/auth/api/client";
 import { apiRequest } from "@/shared/api/client";
@@ -69,6 +69,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null);
@@ -195,7 +196,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const missing: ProfileMissingItem[] = liveCompletion?.missing ?? fromBootstrap.missing;
 
   return (
-    <div className="workspace">
+    <div className={`workspace ${collapsed ? "sidebar-collapsed" : ""}`}>
       {open ? (
         <button
           type="button"
@@ -205,10 +206,20 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         />
       ) : null}
       <aside className={`sidebar ${open ? "open" : ""}`} aria-label="Workspace navigation">
-        <div className="row">
-          <Link className="brand" href="/" onClick={() => setOpen(false)}>
-            Career Copilot
+        <div className="row sidebar-header">
+          <Link className="brand" href="/" onClick={() => setOpen(false)} aria-label="Career Copilot home">
+            <span className="sidebar-brand-full">Career Copilot</span>
+            <span className="sidebar-brand-short" aria-hidden="true">CC</span>
           </Link>
+          <button
+            type="button"
+            className="icon-button sidebar-collapse-button"
+            onClick={() => setCollapsed((current) => !current)}
+            aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? <PanelLeftOpen size={19} aria-hidden /> : <PanelLeftClose size={19} aria-hidden />}
+          </button>
           {open && (
             <button type="button" className="icon-button" onClick={() => setOpen(false)} aria-label="Close navigation">
               <X size={20} aria-hidden />
@@ -228,7 +239,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 aria-current={active ? "page" : undefined}
               >
                 <Icon size={19} aria-hidden />
-                {item.label}
+                <span className="sidebar-link-label">{item.label}</span>
               </Link>
             );
           })}

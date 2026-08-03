@@ -1,6 +1,6 @@
 import unittest
 
-from app.ats.scoring.schemas import GateResult, PARAMETER_KEYS, ScoreResult
+from app.features.ats.scoring.schemas import GateResult, PARAMETER_KEYS, ScoreResult
 
 
 class ScoreSchemaTests(unittest.TestCase):

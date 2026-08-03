@@ -1,7 +1,11 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-const apiBase = () => process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+const apiBase = () => {
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (!base) throw new Error("API base URL is not configured.");
+  return base;
+};
 
 type RouteContext = { params: Promise<{ bucket: string; path: string[] }> };
 

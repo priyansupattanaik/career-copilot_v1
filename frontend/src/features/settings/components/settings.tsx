@@ -323,22 +323,6 @@ function normalizeOptions(
   );
 }
 
-function withExtraOptions(
-  options: readonly { value: string; label: string }[] | readonly string[],
-  extras: Array<string | null | undefined>,
-) {
-  const normalized = normalizeOptions(options);
-  const known = new Set(normalized.map((option) => option.value));
-  for (const extra of extras) {
-    const value = (extra || "").trim();
-    if (value && !known.has(value)) {
-      normalized.push({ value, label: `${value} (saved)` });
-      known.add(value);
-    }
-  }
-  return normalized;
-}
-
 /** Dropdown that supports an Other choice and persists the custom typed value. */
 function RequiredMark() {
   return (
@@ -449,6 +433,10 @@ function SelectWithOther({
   );
 }
 
+/**
+ * Multi-select via dropdown (not a checkbox grid).
+ * Same string[] contract as before — only the UI is compact.
+ */
 function MultiOptionGroup({
   legend,
   options,
@@ -467,60 +455,80 @@ function MultiOptionGroup({
   required?: boolean;
 }) {
   const baseOptions = normalizeOptions(options).filter((option) => option.value !== OTHER_VALUE);
-  // Show presets + already-selected custom tags; do not treat the live Other draft as a checkbox.
-  const normalized = withExtraOptions(baseOptions, selected);
+  const labelByValue = new Map(baseOptions.map((option) => [option.value, option.label]));
+  for (const value of selected) {
+    if (!labelByValue.has(value)) labelByValue.set(value, value);
+  }
+  const available = baseOptions.filter((option) => !selected.includes(option.value));
+  const [pickerValue, setPickerValue] = useState("");
   const [otherText, setOtherText] = useState("");
   const [showOtherInput, setShowOtherInput] = useState(false);
 
-  function toggle(value: string) {
-    if (selected.includes(value)) onChange(selected.filter((item) => item !== value));
-    else onChange([...selected, value]);
+  function addValue(value: string) {
+    const next = value.trim();
+    if (!next || selected.includes(next)) return;
+    onChange([...selected, next]);
+  }
+
+  function removeValue(value: string) {
+    onChange(selected.filter((item) => item !== value));
   }
 
   function addOtherValue() {
     const text = otherText.trim();
     if (!text) return;
-    // Commit only on Add / Enter — never while typing, even if text matches a preset name.
-    if (!selected.includes(text)) onChange([...selected, text]);
+    // Commit only on Add / Enter — never while typing.
+    addValue(text);
     setOtherText("");
-    // Keep Other open so more custom values can be typed without re-checking the box.
-    setShowOtherInput(true);
+    setShowOtherInput(false);
+    setPickerValue("");
   }
 
   return (
-    <fieldset className="stack" style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 14, margin: 0 }}>
+    <fieldset className="stack" style={{ border: "1px solid var(--border)", borderRadius: 14, padding: 14, margin: 0, gap: 10 }}>
       <legend style={{ padding: "0 6px", fontWeight: 700 }}>
         {legend}
         {required ? <RequiredMark /> : null}
       </legend>
-      <div className="cluster">
-        {normalized.map((option) => (
-          <label key={option.value} className="row" style={{ gap: 8, justifyContent: "flex-start" }}>
-            <input
-              type="checkbox"
-              checked={selected.includes(option.value)}
-              onChange={() => toggle(option.value)}
-            />
-            <span>{option.label}</span>
-          </label>
-        ))}
-        {allowOther && (
-          <label className="row" style={{ gap: 8, justifyContent: "flex-start" }}>
-            <input
-              type="checkbox"
-              checked={showOtherInput}
-              onChange={(e) => {
-                setShowOtherInput(e.target.checked);
-                if (!e.target.checked) setOtherText("");
-              }}
-            />
-            <span>Other</span>
-          </label>
-        )}
-      </div>
+
+      <label className="field-label">
+        Add {legend.toLowerCase()}
+        <Select
+          value={pickerValue}
+          onChange={(e) => {
+            const next = e.target.value;
+            if (!next) {
+              setPickerValue("");
+              return;
+            }
+            if (next === OTHER_VALUE) {
+              setPickerValue(OTHER_VALUE);
+              setShowOtherInput(true);
+              return;
+            }
+            addValue(next);
+            setPickerValue("");
+            setShowOtherInput(false);
+            setOtherText("");
+          }}
+        >
+          <option value="">
+            {available.length === 0 && !allowOther
+              ? "All options selected"
+              : `Select ${legend.toLowerCase()}…`}
+          </option>
+          {available.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+          {allowOther ? <option value={OTHER_VALUE}>Other…</option> : null}
+        </Select>
+      </label>
+
       {allowOther && showOtherInput && (
-        <div className="cluster">
-          <label className="field-label" style={{ flex: 1 }}>
+        <div className="cluster" style={{ alignItems: "end" }}>
+          <label className="field-label" style={{ flex: 1, minWidth: 180 }}>
             Specify other
             <Input
               type="text"
@@ -539,7 +547,41 @@ function MultiOptionGroup({
           <Button type="button" onClick={addOtherValue} disabled={!otherText.trim()}>
             Add
           </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              setShowOtherInput(false);
+              setOtherText("");
+              setPickerValue("");
+            }}
+          >
+            Cancel
+          </Button>
         </div>
+      )}
+
+      {selected.length > 0 ? (
+        <div className="cluster" role="list" aria-label={`Selected ${legend.toLowerCase()}`}>
+          {selected.map((value) => (
+            <span key={value} className="badge badge-info" role="listitem" style={{ gap: 8 }}>
+              {labelByValue.get(value) || value}
+              <button
+                type="button"
+                className="button-quiet"
+                style={{ minHeight: "auto", padding: 0, boxShadow: "none", border: "none", fontWeight: 700 }}
+                onClick={() => removeValue(value)}
+                aria-label={`Remove ${labelByValue.get(value) || value}`}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="mono" style={{ margin: 0, opacity: 0.8 }}>
+          None selected yet{required ? " (required)" : ""}.
+        </p>
       )}
     </fieldset>
   );
@@ -1517,48 +1559,50 @@ export function ProfileSettings() {
 
           <Card className="stack">
             <h2 style={{ margin: 0 }}>Career preferences</h2>
-            <p>These preferences are saved to your account.</p>
-            <MultiOptionGroup
-              legend="Target roles"
-              options={TARGET_ROLE_OPTIONS}
-              selected={prefDraft.target_roles}
-              onChange={(target_roles) => setPrefDraft({ ...prefDraft, target_roles })}
-              allowOther
-              otherPlaceholder="Enter another target role"
-              required
-            />
-            <MultiOptionGroup
-              legend="Preferred industries"
-              options={INDUSTRY_OPTIONS}
-              selected={prefDraft.preferred_industries}
-              onChange={(preferred_industries) => setPrefDraft({ ...prefDraft, preferred_industries })}
-              allowOther
-              otherPlaceholder="Enter another industry"
-            />
-            <MultiOptionGroup
-              legend="Preferred locations"
-              options={LOCATION_OPTIONS}
-              selected={prefDraft.preferred_locations}
-              onChange={(preferred_locations) => setPrefDraft({ ...prefDraft, preferred_locations })}
-              allowOther
-              otherPlaceholder="Enter another location"
-              required
-            />
-            <MultiOptionGroup
-              legend="Work modes"
-              options={WORK_MODE_OPTIONS}
-              selected={prefDraft.work_modes}
-              onChange={(work_modes) => setPrefDraft({ ...prefDraft, work_modes })}
-              required
-            />
-            <MultiOptionGroup
-              legend="Employment types"
-              options={EMPLOYMENT_TYPE_OPTIONS}
-              selected={prefDraft.employment_types}
-              onChange={(employment_types) => setPrefDraft({ ...prefDraft, employment_types })}
-              allowOther
-              otherPlaceholder="Enter another employment type"
-            />
+            <p>These preferences are saved to your account. Use each dropdown to add options; remove tags with ×.</p>
+            <div className="grid-2">
+              <MultiOptionGroup
+                legend="Target roles"
+                options={TARGET_ROLE_OPTIONS}
+                selected={prefDraft.target_roles}
+                onChange={(target_roles) => setPrefDraft({ ...prefDraft, target_roles })}
+                allowOther
+                otherPlaceholder="Enter another target role"
+                required
+              />
+              <MultiOptionGroup
+                legend="Preferred industries"
+                options={INDUSTRY_OPTIONS}
+                selected={prefDraft.preferred_industries}
+                onChange={(preferred_industries) => setPrefDraft({ ...prefDraft, preferred_industries })}
+                allowOther
+                otherPlaceholder="Enter another industry"
+              />
+              <MultiOptionGroup
+                legend="Preferred locations"
+                options={LOCATION_OPTIONS}
+                selected={prefDraft.preferred_locations}
+                onChange={(preferred_locations) => setPrefDraft({ ...prefDraft, preferred_locations })}
+                allowOther
+                otherPlaceholder="Enter another location"
+                required
+              />
+              <MultiOptionGroup
+                legend="Work modes"
+                options={WORK_MODE_OPTIONS}
+                selected={prefDraft.work_modes}
+                onChange={(work_modes) => setPrefDraft({ ...prefDraft, work_modes })}
+                required
+              />
+              <MultiOptionGroup
+                legend="Employment types"
+                options={EMPLOYMENT_TYPE_OPTIONS}
+                selected={prefDraft.employment_types}
+                onChange={(employment_types) => setPrefDraft({ ...prefDraft, employment_types })}
+                allowOther
+                otherPlaceholder="Enter another employment type"
+              />
+            </div>
             <div className="grid-2">
               <SelectWithOther
                 label="Work authorization"

@@ -54,12 +54,7 @@ export function SignInScreen() {
   const [verificationMessage, setVerificationMessage] = useState("");
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    if (process.env.NODE_ENV !== "production" && email.trim() === "dummy" && password === "dummy") {
-      document.cookie = "career_copilot_demo=1; Path=/; SameSite=Lax";
-      router.replace(search.get("next") || "/dashboard");
-      router.refresh();
-      return;
-    }
+
     const authClient = createClient();
     if (!authClient) return setError(configurationError());
     setBusy(true);

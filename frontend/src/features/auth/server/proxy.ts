@@ -5,9 +5,7 @@ const protectedRoots = ["/dashboard", "/resume-analysis", "/resume-builder", "/m
 export function updateSession(request: NextRequest) {
   const path = request.nextUrl.pathname;
   const isProtected = protectedRoots.some((root) => path.startsWith(root));
-  const demoMode = process.env.NODE_ENV !== "production" && request.cookies.get("career_copilot_demo")?.value === "1";
   const loggedIn = Boolean(request.cookies.get("career_copilot_session")?.value);
-  if (demoMode && isProtected) return NextResponse.next();
   if (isProtected && !loggedIn) {
     const url = request.nextUrl.clone();
     url.pathname = "/sign-in";

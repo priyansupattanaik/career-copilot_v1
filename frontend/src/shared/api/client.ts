@@ -18,10 +18,12 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
     const existing = inFlightGets.get(requestKey);
     if (existing) return existing as Promise<T>;
   }
-  const base =
-    typeof window === "undefined"
-      ? `${process.env.PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000"}/api/v1`
-      : "/api/backend";
+  const base = (() => {
+    if (typeof window !== "undefined") return "/api/backend";
+    const url = process.env.PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL;
+    if (!url) throw new Error("API base URL is not configured.");
+    return `${url}/api/v1`;
+  })();
   const request = (async () => {
     let response: Response;
     try {

@@ -6,8 +6,13 @@ async function forward(request: Request, context: { params: Promise<{ path: stri
   const { path } = await context.params;
   const backendBase =
     process.env.PUBLIC_API_BASE_URL ||
-    process.env.NEXT_PUBLIC_API_BASE_URL ||
-    "http://127.0.0.1:8000";
+    process.env.NEXT_PUBLIC_API_BASE_URL;
+  if (!backendBase) {
+    return NextResponse.json(
+      { error: { code: "configuration_error", message: "API base URL is not configured." } },
+      { status: 500 }
+    );
+  }
   const incoming = new URL(request.url);
   const target = `${backendBase.replace(/\/$/, "")}/api/v1/${path.map(encodeURIComponent).join("/")}${incoming.search}`;
   const headers = new Headers(request.headers);
