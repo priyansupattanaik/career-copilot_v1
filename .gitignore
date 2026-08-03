@@ -53,6 +53,9 @@ Thumbs.db
 
 # Local database files and uploaded objects
 .data/
+backend/.data/
+*.sqlite-shm
+*.sqlite-wal
 
 # Editor
 .idea/
