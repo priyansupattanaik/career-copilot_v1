@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     improvement_max_source_chars: int = Field(default=30_000, ge=1_000, le=100_000)
     improvement_max_jd_chars: int = Field(default=12_000, ge=1_000, le=50_000)
     export_signed_url_seconds: int = Field(default=300, ge=30, le=3600)
+    # YouTube Data API v3 — exact video recommendations for learning paths (server-only).
+    youtube_api_key: str = ""
+    youtube_api_base_url: str = "https://www.googleapis.com/youtube/v3"
+    youtube_search_max_results: int = Field(default=3, ge=1, le=5)
+    youtube_timeout_seconds: float = Field(default=20.0, gt=0, le=60)
 
     @field_validator("frontend_origins", mode="before")
     @classmethod
@@ -128,6 +133,10 @@ class Settings(BaseSettings):
             and self.groq_resume_parser_model
             and self.groq_base_url
         )
+
+    @property
+    def youtube_configured(self) -> bool:
+        return bool(self.youtube_api_key and self.youtube_api_base_url)
 
 
 

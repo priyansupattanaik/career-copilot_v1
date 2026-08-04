@@ -9,6 +9,7 @@ from typing import Any
 from app.agents.providers.groq_client import GroqClient, PROMPTS_DIR
 from app.core.config import Settings
 from app.features.learning.agents.crew.models import YoutubeLessonPlanItem, YoutubeLessonPlanResult
+from app.features.learning.youtube_api import search_youtube_videos
 from app.features.learning.youtube_catalog import (
     ALGORITHM_VERSION,
     build_grounded_resource,
@@ -60,10 +61,10 @@ def _deterministic_plan(allowed_gaps: list[str]) -> YoutubeLessonPlanResult:
                 skill_gap=gap,
                 title=f"Learn {gap} with guided YouTube practice",
                 objective=(
-                    f"Study {gap} using reputable free YouTube tutorials, then practice a small "
-                    f"project. Only claim {gap} on your resume when the experience is real."
+                    f"Study {gap} using free YouTube tutorials returned by the YouTube API, "
+                    f"then practice a small project. Only claim {gap} when the experience is real."
                 ),
-                youtube_search_query=f"{gap} tutorial for beginners freeCodeCamp",
+                youtube_search_query=f"{gap} tutorial for beginners",
                 estimated_minutes=60 if index <= 4 else 90,
                 difficulty="foundational" if index <= 4 else "applied",
             )
@@ -95,7 +96,6 @@ async def tool_plan_youtube_lessons(settings: Settings, context: dict[str, Any])
         else "Return JSON recommendations only for allowed_gaps. Never invent video IDs."
     )
 
-    # Prefer Groq for curriculum text; deterministic planner always works without LLM.
     if settings.groq_configured:
         try:
             result = await GroqClient(settings).generate_structured(
@@ -111,9 +111,26 @@ async def tool_plan_youtube_lessons(settings: Settings, context: dict[str, Any])
     return {"provider": "deterministic", "plan": _deterministic_plan(allowed_gaps).model_dump()}
 
 
-def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
+async def _resources_for_gap(
+    settings: Settings,
+    *,
+    gap: str,
+    query: str,
+    preferred_title: str | None,
+) -> list[dict[str, Any]]:
+    videos = await search_youtube_videos(settings, query=query, gap=gap)
+    resources = build_grounded_resource(
+        gap=gap,
+        search_query=query,
+        preferred_title=preferred_title,
+        api_videos=videos,
+    )
+    return [r for r in resources if is_allowed_youtube_url(str(r.get("url") or ""))]
+
+
+async def tool_validate_and_materialize(settings: Settings, context: dict[str, Any]) -> dict[str, Any]:
     """
-    Validator gate: drop any item outside allowed gaps; materialize safe YouTube resources.
+    Validator gate: drop any item outside allowed gaps; materialize real YouTube videos via API.
     """
     allowed_gaps: list[str] = list(context.get("allowed_gaps") or [])
     allowed_map = {normal_skill(g): g for g in allowed_gaps}
@@ -125,6 +142,7 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
     accepted: list[dict[str, Any]] = []
     rejected: list[str] = []
     used: set[str] = set()
+    api_hits = 0
 
     for index, raw in enumerate(raw_items, start=1):
         if not isinstance(raw, dict):
@@ -138,23 +156,24 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
         if key in used:
             rejected.append(f"{gap_raw}:duplicate_gap")
             continue
-        # Prefer canonical gap wording from evidence
         gap = allowed_map[key]
         query = str(raw.get("youtube_search_query") or f"{gap} tutorial").strip()
-        # Search query must reference the gap (token overlap), preventing topic drift
         gap_tokens = {t for t in re.findall(r"[a-z0-9+#.]{2,}", normal_skill(gap))}
         query_tokens = {t for t in re.findall(r"[a-z0-9+#.]{2,}", normal_skill(query))}
         if gap_tokens and not (gap_tokens & query_tokens):
             query = f"{gap} tutorial for beginners"
 
-        resource = build_grounded_resource(
+        resources = await _resources_for_gap(
+            settings,
             gap=gap,
-            search_query=query,
+            query=query,
             preferred_title=str(raw.get("title") or "").strip() or None,
         )
-        if not is_allowed_youtube_url(str(resource.get("url") or "")):
-            rejected.append(f"{gap}:invalid_youtube_url")
+        if not resources:
+            rejected.append(f"{gap}:no_safe_youtube_resource")
             continue
+        if any(r.get("resource_type") == "youtube_video" for r in resources):
+            api_hits += 1
 
         try:
             minutes = int(raw.get("estimated_minutes") or 60)
@@ -167,7 +186,7 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
         objective = str(raw.get("objective") or "").strip()
         if len(objective) < 10:
             objective = (
-                f"Study {gap} with free YouTube tutorials and practise a small exercise. "
+                f"Study {gap} with the recommended YouTube video(s), then practise a small exercise. "
                 f"Do not claim {gap} unless it is true experience."
             )
 
@@ -185,25 +204,37 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
                     "algorithm_version": ALGORITHM_VERSION,
                     "match_status_filter": sorted(_GAP_STATUSES),
                     "planner_provider": context.get("planner_provider"),
+                    "youtube_api_configured": bool(settings.youtube_configured),
+                    "resource_kinds": [r.get("resource_type") for r in resources],
                     "grounding": "ats_evidence_only",
                 },
-                "resources": [resource],
+                "resources": resources,
             }
         )
         used.add(key)
 
-    # Ensure every allowed gap still gets a deterministic YouTube resource if the LLM skipped it
+    # Fill gaps the planner skipped
     for gap in allowed_gaps:
         key = normal_skill(gap)
         if key in used:
             continue
-        resource = build_grounded_resource(gap=gap, search_query=f"{gap} tutorial for beginners")
+        resources = await _resources_for_gap(
+            settings,
+            gap=gap,
+            query=f"{gap} tutorial for beginners",
+            preferred_title=None,
+        )
+        if not resources:
+            rejected.append(f"{gap}:no_safe_youtube_resource")
+            continue
+        if any(r.get("resource_type") == "youtube_video" for r in resources):
+            api_hits += 1
         accepted.append(
             {
                 "position": len(accepted) + 1,
                 "title": f"Learn {gap} with guided YouTube practice",
                 "objective": (
-                    f"Study {gap} using reputable free YouTube tutorials, then practise. "
+                    f"Study {gap} using the recommended YouTube video(s), then practise. "
                     f"Only claim {gap} when the experience is real."
                 ),
                 "item_type": "youtube_skill_gap",
@@ -214,14 +245,15 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
                     "requirement": gap,
                     "algorithm_version": ALGORITHM_VERSION,
                     "planner_provider": "validator_fill",
+                    "youtube_api_configured": bool(settings.youtube_configured),
+                    "resource_kinds": [r.get("resource_type") for r in resources],
                     "grounding": "ats_evidence_only",
                 },
-                "resources": [resource],
+                "resources": resources,
             }
         )
         used.add(key)
 
-    # Cap path length for usability
     accepted = accepted[:10]
     for index, item in enumerate(accepted, start=1):
         item["position"] = index
@@ -231,4 +263,6 @@ def tool_validate_and_materialize(context: dict[str, Any]) -> dict[str, Any]:
         "rejected": rejected,
         "algorithm_version": ALGORITHM_VERSION,
         "accepted_count": len(accepted),
+        "youtube_api_video_steps": api_hits,
+        "youtube_api_configured": bool(settings.youtube_configured),
     }

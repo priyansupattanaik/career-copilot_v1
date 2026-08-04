@@ -21,6 +21,14 @@ type Resource = {
   provider?: string | null;
   url?: string | null;
   reason_recommended?: string | null;
+  metadata?: {
+    video_id?: string;
+    channel_title?: string;
+    thumbnail_url?: string;
+    search_query?: string;
+    video_id_policy?: string;
+    source?: string;
+  } | null;
 };
 
 type LearningItem = {
@@ -48,6 +56,12 @@ function isYoutubeResource(resource: Resource) {
   const type = (resource.resource_type || "").toLowerCase();
   const url = resource.url || "";
   return type.includes("youtube") || /youtube\.com|youtu\.be/i.test(url);
+}
+
+function isExactYoutubeVideo(resource: Resource) {
+  const type = (resource.resource_type || "").toLowerCase();
+  const url = resource.url || "";
+  return type === "youtube_video" || /youtube\.com\/watch\?v=|youtu\.be\//i.test(url);
 }
 
 export function LearningHome() {
@@ -90,7 +104,7 @@ export function LearningHome() {
       <PageHeader
         eyebrow="Learning"
         title="Learning paths"
-        description="Generate a YouTube study plan only from gaps in your completed ATS analysis. Track progress as you finish each video step."
+        description="Generate a study plan only from gaps in your completed ATS analysis. Each step recommends exact YouTube videos from the YouTube API — not invented links."
         action={
           <Button onClick={generate} disabled={busy}>
             {busy ? (
@@ -98,7 +112,7 @@ export function LearningHome() {
             ) : (
               <Video size={17} aria-hidden />
             )}
-            {busy ? "Building path…" : "Generate YouTube path from ATS"}
+            {busy ? "Finding videos…" : "Generate YouTube path from ATS"}
           </Button>
         }
       />
@@ -194,7 +208,7 @@ export function LearningPath({ pathId }: { pathId: string }) {
         title={path?.title || "Path details"}
         description={
           path?.description ||
-          "Each step is grounded in an ATS gap. Watch the linked YouTube material and mark progress."
+          "Each step is an ATS skill gap with exact YouTube video recommendations. Open a video, learn, then mark complete."
         }
       />
       {error && (
@@ -263,35 +277,69 @@ export function LearningPath({ pathId }: { pathId: string }) {
                   <div className="cluster">
                     <span className="muted">{item.estimated_minutes || 0} minutes</span>
                     {item.difficulty && <Badge tone="info">{item.difficulty}</Badge>}
+                    <Badge tone="ai">What to learn</Badge>
                   </div>
 
                   {(item.learning_resources || []).length > 0 && (
-                    <div className="stack" style={{ gap: 8, marginTop: 4 }}>
+                    <div className="stack" style={{ gap: 12, marginTop: 8 }}>
+                      <strong style={{ fontSize: "var(--text-sm)" }}>Recommended YouTube videos</strong>
                       {item.learning_resources?.map((resource) =>
                         resource.url ? (
-                          <a
+                          <div
                             key={resource.id}
-                            href={resource.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="button button-secondary"
-                            style={{ justifyContent: "flex-start", width: "fit-content" }}
+                            className="panel-blue"
+                            style={{
+                              padding: 12,
+                              display: "grid",
+                              gridTemplateColumns: resource.metadata?.thumbnail_url ? "120px 1fr" : "1fr",
+                              gap: 12,
+                              alignItems: "center",
+                            }}
                           >
-                            {isYoutubeResource(resource) ? (
-                              <Video size={17} aria-hidden />
-                            ) : (
-                              <BookOpenCheck size={17} aria-hidden />
-                            )}
-                            {resource.title}
-                            <ExternalLink size={14} aria-hidden />
-                          </a>
-                        ) : null
-                      )}
-                      {item.learning_resources?.map((resource) =>
-                        resource.reason_recommended ? (
-                          <p key={`${resource.id}-reason`} className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
-                            {resource.reason_recommended}
-                          </p>
+                            {resource.metadata?.thumbnail_url ? (
+                              // eslint-disable-next-line @next/next/no-img-element
+                              <img
+                                src={resource.metadata.thumbnail_url}
+                                alt=""
+                                width={120}
+                                height={68}
+                                style={{ borderRadius: 8, objectFit: "cover", width: "100%", height: "auto" }}
+                              />
+                            ) : null}
+                            <div className="stack" style={{ gap: 6 }}>
+                              <div className="cluster">
+                                <Badge tone={isExactYoutubeVideo(resource) ? "success" : "info"}>
+                                  {isExactYoutubeVideo(resource) ? "Exact video" : "Search results"}
+                                </Badge>
+                                {resource.provider ? (
+                                  <span className="muted" style={{ fontSize: "var(--text-xs)" }}>
+                                    {resource.provider}
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p style={{ margin: 0, fontWeight: 600 }}>{resource.title}</p>
+                              {resource.reason_recommended ? (
+                                <p className="muted" style={{ margin: 0, fontSize: "var(--text-sm)" }}>
+                                  {resource.reason_recommended}
+                                </p>
+                              ) : null}
+                              <a
+                                href={resource.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="button button-primary"
+                                style={{ justifyContent: "flex-start", width: "fit-content" }}
+                              >
+                                {isYoutubeResource(resource) ? (
+                                  <Video size={17} aria-hidden />
+                                ) : (
+                                  <BookOpenCheck size={17} aria-hidden />
+                                )}
+                                {isExactYoutubeVideo(resource) ? "Watch on YouTube" : "Open YouTube search"}
+                                <ExternalLink size={14} aria-hidden />
+                              </a>
+                            </div>
+                          </div>
                         ) : null
                       )}
                     </div>

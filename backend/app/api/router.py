@@ -2516,8 +2516,8 @@ async def generate_learning_path(
 
     Crew (sequential, CrewAI-compatible):
       1) ATS gap analyst (deterministic evidence extract)
-      2) YouTube curriculum planner (Groq LLM or deterministic)
-      3) Resource validator (safe YouTube search/catalog URLs only — no invented video IDs)
+      2) YouTube curriculum planner (Groq LLM or deterministic) — queries only
+      3) Resource validator: YouTube Data API exact videos (no invented IDs)
     """
     client = client_for(settings, user)
     analyses = (
@@ -2580,8 +2580,8 @@ async def generate_learning_path(
         "title": f"YouTube learning path · {resume.get('title') or 'your resume'}",
         "description": (
             "Study plan from requirements not fully evidenced in your completed ATS analysis. "
-            "Each step links to free YouTube learning (search or curated). "
-            "Mark items complete as you finish — progress is saved to your account."
+            "Each step recommends exact YouTube videos from the YouTube API (or a search page if the API is unavailable). "
+            "Open a video, learn, then mark the step complete — progress is saved to your account."
         ),
         "source_type": "ats_analysis",
         "source_id": str(analysis["id"]),

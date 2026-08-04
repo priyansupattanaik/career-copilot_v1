@@ -383,16 +383,22 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}): P
           learning_resources: [
             {
               id: resourceId,
-              title: "YouTube lessons: Docker",
-              resource_type: "youtube_search",
-              provider: "YouTube",
-              url: "https://www.youtube.com/results?search_query=docker+tutorial+freecodecamp",
-              reason_recommended: "Demo YouTube search for an illustrative ATS gap.",
+              title: "Docker Tutorial for Beginners — Demo",
+              resource_type: "youtube_video",
+              provider: "freeCodeCamp.org",
+              url: "https://www.youtube.com/watch?v=fqMOX6JJhGo",
+              reason_recommended: "Demo exact YouTube video for an illustrative ATS gap (not live API).",
+              metadata: {
+                video_id: "fqMOX6JJhGo",
+                channel_title: "freeCodeCamp.org",
+                source: "demo",
+                video_id_policy: "demo_known_public_video",
+              },
             },
           ],
         },
       ],
-      algorithm_version: "ats-youtube-crew-v1",
+      algorithm_version: "ats-youtube-api-v1",
     };
     state.learningPaths.unshift(path);
     return path as T;

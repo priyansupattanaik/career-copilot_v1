@@ -80,9 +80,10 @@ def learning_crew_capability(settings: Settings) -> dict[str, Any]:
         "tasks": [t.name for t in LEARNING_CREW_TASKS],
         "truthfulness": (
             "Gaps must come from completed ATS evidence. "
-            "YouTube resources are search URLs or allowlisted entries only — never invented video IDs."
+            "Exact video recommendations come only from YouTube Data API results — never invented video IDs."
         ),
         "llm_configured": bool(settings.groq_configured or settings.nvidia_configured),
+        "youtube_api_configured": bool(getattr(settings, "youtube_configured", False)),
     }
 
 
@@ -168,9 +169,9 @@ async def run_learning_youtube_crew(
             )
         )
 
-    # Task 3 — validate + materialize
+    # Task 3 — validate + materialize exact YouTube videos via API
     try:
-        final = tool_validate_and_materialize(context)
+        final = await tool_validate_and_materialize(settings, context)
         items = list(final.get("items") or [])
         audit.tasks.append(
             CrewTaskResult(
@@ -181,6 +182,8 @@ async def run_learning_youtube_crew(
                 output={
                     "accepted_count": final.get("accepted_count"),
                     "rejected": final.get("rejected") or [],
+                    "youtube_api_configured": final.get("youtube_api_configured"),
+                    "youtube_api_video_steps": final.get("youtube_api_video_steps"),
                 },
             )
         )
@@ -189,6 +192,8 @@ async def run_learning_youtube_crew(
             "planner_provider": context.get("planner_provider"),
             "item_count": len(items),
             "source_analysis_id": source_analysis_id,
+            "youtube_api_configured": final.get("youtube_api_configured"),
+            "youtube_api_video_steps": final.get("youtube_api_video_steps"),
         }
         return items, audit
     except Exception as exc:
