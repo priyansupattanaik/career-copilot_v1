@@ -2491,6 +2491,26 @@ def get_learning(
     return path
 
 
+@router.delete("/learning-paths/{path_id}", status_code=204)
+def delete_learning_path(
+    path_id: UUID,
+    user: CurrentUser = Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+):
+    """Delete a candidate-owned learning path (items and resources cascade in DB)."""
+    client = client_for(settings, user)
+    owned_row(client, "learning_paths", path_id, user)
+    client.table("learning_paths").delete().eq("id", str(path_id)).eq("user_id", str(user.id)).execute()
+    write_activity(
+        client,
+        user,
+        "learning_path_deleted",
+        "Learning path deleted",
+        "learning_path",
+        str(path_id),
+    )
+
+
 @router.post("/learning-paths", status_code=201)
 def create_learning(
     payload: LearningPathCreate,

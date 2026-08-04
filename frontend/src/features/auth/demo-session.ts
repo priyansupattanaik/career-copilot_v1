@@ -407,6 +407,10 @@ export async function demoApiRequest<T>(path: string, init: RequestInit = {}): P
     const path = state.learningPaths.find((item) => item.id === parts[1]);
     return path as T;
   }
+  if (parts[0] === "learning-paths" && parts.length === 2 && method === "DELETE") {
+    state.learningPaths = state.learningPaths.filter((item) => item.id !== parts[1]);
+    return undefined as T;
+  }
   if (parts[0] === "learning-paths" && parts[2] === "items" && method === "PATCH") {
     const path = state.learningPaths.find((item) => item.id === parts[1]);
     const item = path?.items?.find((row: DemoRecord) => row.id === parts[3]);

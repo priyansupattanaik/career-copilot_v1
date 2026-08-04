@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   BookOpenCheck,
@@ -9,6 +10,7 @@ import {
   ExternalLink,
   LoaderCircle,
   PlayCircle,
+  Trash2,
   Video,
 } from "lucide-react";
 import { apiRequest } from "@/shared/api/client";
@@ -68,6 +70,7 @@ export function LearningHome() {
   const [paths, setPaths] = useState<Path[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -99,6 +102,27 @@ export function LearningHome() {
     }
   }
 
+  async function deletePath(path: Path) {
+    const label = path.title || "this learning path";
+    if (
+      !window.confirm(
+        `Delete “${label}” permanently? Steps and recommended videos for this path will be removed from your account.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(path.id);
+    setError("");
+    try {
+      await apiRequest(`/learning-paths/${path.id}`, { method: "DELETE" });
+      setPaths((current) => current.filter((row) => row.id !== path.id));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -106,7 +130,7 @@ export function LearningHome() {
         title="Learning paths"
         description="Generate a study plan only from gaps in your completed ATS analysis. Each step recommends exact YouTube videos from the YouTube API — not invented links."
         action={
-          <Button onClick={generate} disabled={busy}>
+          <Button onClick={generate} disabled={busy || Boolean(deletingId)}>
             {busy ? (
               <LoaderCircle className="spin" size={17} aria-hidden />
             ) : (
@@ -152,9 +176,20 @@ export function LearningHome() {
                   <span className="muted">{path.items?.length} items</span>
                 )}
               </div>
-              <Link className="button button-secondary" href={`/learning/${path.id}`}>
-                Open path & track progress
-              </Link>
+              <div className="cluster" style={{ marginTop: 12 }}>
+                <Link className="button button-secondary" href={`/learning/${path.id}`}>
+                  Open path & track progress
+                </Link>
+                <Button
+                  variant="danger"
+                  disabled={deletingId === path.id || busy}
+                  onClick={() => void deletePath(path)}
+                  aria-label={`Delete learning path ${path.title}`}
+                >
+                  <Trash2 size={17} aria-hidden />
+                  {deletingId === path.id ? "Deleting…" : "Delete"}
+                </Button>
+              </div>
             </Card>
           ))}
         </div>
@@ -164,9 +199,11 @@ export function LearningHome() {
 }
 
 export function LearningPath({ pathId }: { pathId: string }) {
+  const router = useRouter();
   const [path, setPath] = useState<Path | null>(null);
   const [error, setError] = useState("");
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(() => {
     apiRequest<Path>(`/learning-paths/${pathId}`)
@@ -175,6 +212,27 @@ export function LearningPath({ pathId }: { pathId: string }) {
   }, [pathId]);
 
   useEffect(load, [load]);
+
+  async function deletePath() {
+    const label = path?.title || "this learning path";
+    if (
+      !window.confirm(
+        `Delete “${label}” permanently? Steps and recommended videos for this path will be removed from your account.`,
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    setError("");
+    try {
+      await apiRequest(`/learning-paths/${pathId}`, { method: "DELETE" });
+      router.push("/learning");
+      router.refresh();
+    } catch (e) {
+      setError((e as Error).message);
+      setDeleting(false);
+    }
+  }
 
   async function update(item: LearningItem, status: LearningItem["status"]) {
     setUpdatingId(item.id);
@@ -209,6 +267,14 @@ export function LearningPath({ pathId }: { pathId: string }) {
         description={
           path?.description ||
           "Each step is an ATS skill gap with exact YouTube video recommendations. Open a video, learn, then mark complete."
+        }
+        action={
+          path ? (
+            <Button variant="danger" disabled={deleting || Boolean(updatingId)} onClick={() => void deletePath()}>
+              <Trash2 size={17} aria-hidden />
+              {deleting ? "Deleting…" : "Delete path"}
+            </Button>
+          ) : undefined
         }
       />
       {error && (
